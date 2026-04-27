@@ -23,6 +23,10 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
 app.use('/auth', authRouter);
 app.use('/genres', genresRouter);
 app.use('/songs', songsRouter);
