@@ -16,11 +16,12 @@ function isValidEmail(email) {
 }
 
 function refreshCookieOptions() {
+  const isDeployed = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging';
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    partitioned: process.env.NODE_ENV === 'production',
+    secure: isDeployed,
+    sameSite: isDeployed ? 'none' : 'lax',
+    partitioned: isDeployed,
     maxAge: REFRESH_TOKEN_MAX_AGE,
   };
 }
