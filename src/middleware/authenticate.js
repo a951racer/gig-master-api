@@ -23,6 +23,11 @@ async function authenticate(req, res, next) {
       });
     }
     req.user = user;
+    req.tokenClaims = {
+      sub: decoded.sub,
+      role: decoded.role,
+      bands: decoded.bands || [],
+    };
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
