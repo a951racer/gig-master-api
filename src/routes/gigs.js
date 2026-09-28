@@ -2,15 +2,17 @@ const express = require('express');
 const Gig = require('../models/Gig');
 const Playlist = require('../models/Playlist');
 const authenticate = require('../middleware/authenticate');
+const bandScope = require('../middleware/bandScope');
 
 const router = express.Router();
 
 router.use(authenticate);
+router.use(bandScope);
 
 // GET /gigs — all gigs sorted by date descending, playlist name only
 router.get('/', async (req, res, next) => {
   try {
-    const gigs = await Gig.find()
+    const gigs = await Gig.find({ band: req.currentBand })
       .sort({ date: -1 })
       .populate('playlist', '_id name');
     res.json(gigs);
@@ -41,7 +43,7 @@ router.post('/', async (req, res, next) => {
     }
 
     if (playlist) {
-      const playlistDoc = await Playlist.findById(playlist);
+      const playlistDoc = await Playlist.findOne({ _id: playlist, band: req.currentBand });
       if (!playlistDoc) {
         const err = new Error('Invalid playlist');
         err.status = 422;
@@ -51,7 +53,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    const gig = new Gig({ name, description, location, date, playlist: playlist || null });
+    const gig = new Gig({ band: req.currentBand, name, description, location, date, playlist: playlist || null });
     await gig.save();
     res.status(201).json(gig);
   } catch (err) {
@@ -62,7 +64,7 @@ router.post('/', async (req, res, next) => {
 // GET /gigs/:id — full gig with playlist populated (songs + genre)
 router.get('/:id', async (req, res, next) => {
   try {
-    const gig = await Gig.findById(req.params.id).populate({
+    const gig = await Gig.findOne({ _id: req.params.id, band: req.currentBand }).populate({
       path: 'playlist',
       populate: {
         path: 'songs',
@@ -84,7 +86,7 @@ router.get('/:id', async (req, res, next) => {
 // PATCH /gigs/:id — partial update
 router.patch('/:id', async (req, res, next) => {
   try {
-    const gig = await Gig.findById(req.params.id);
+    const gig = await Gig.findOne({ _id: req.params.id, band: req.currentBand });
     if (!gig) {
       const err = new Error('Gig not found');
       err.status = 404;
@@ -95,7 +97,7 @@ router.patch('/:id', async (req, res, next) => {
     const { name, description, location, date, playlist } = req.body;
 
     if ('playlist' in req.body && playlist !== null && playlist !== undefined) {
-      const playlistDoc = await Playlist.findById(playlist);
+      const playlistDoc = await Playlist.findOne({ _id: playlist, band: req.currentBand });
       if (!playlistDoc) {
         const err = new Error('Invalid playlist');
         err.status = 422;
@@ -121,7 +123,7 @@ router.patch('/:id', async (req, res, next) => {
 // DELETE /gigs/:id
 router.delete('/:id', async (req, res, next) => {
   try {
-    const gig = await Gig.findById(req.params.id);
+    const gig = await Gig.findOne({ _id: req.params.id, band: req.currentBand });
     if (!gig) {
       const err = new Error('Gig not found');
       err.status = 404;

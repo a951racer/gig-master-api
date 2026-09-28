@@ -3,16 +3,18 @@ const mongoose = require('mongoose');
 const Song = require('../models/Song');
 const Genre = require('../models/Genre');
 const authenticate = require('../middleware/authenticate');
+const bandScope = require('../middleware/bandScope');
 
 const router = express.Router();
 
 router.use(authenticate);
+router.use(bandScope);
 
 // GET /songs — list with optional filters
 router.get('/', async (req, res, next) => {
   try {
     const { title, genre, tags } = req.query;
-    const filter = {};
+    const filter = { band: req.currentBand };
 
     if (title) {
       filter.title = { $regex: title, $options: 'i' };
@@ -58,7 +60,7 @@ router.post('/', async (req, res, next) => {
     }
 
     if (genre) {
-      const genreDoc = await Genre.findById(genre);
+      const genreDoc = await Genre.findOne({ _id: genre, band: req.currentBand });
       if (!genreDoc) {
         const err = new Error('Invalid genre');
         err.status = 422;
@@ -68,7 +70,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    const song = new Song({ title, artist, genre: genre || null, tags, originalKey, performedKey });
+    const song = new Song({ band: req.currentBand, title, artist, genre: genre || null, tags, originalKey, performedKey });
     await song.save();
     await song.populate('genre', '_id name slug');
 
@@ -81,7 +83,7 @@ router.post('/', async (req, res, next) => {
 // GET /songs/:id
 router.get('/:id', async (req, res, next) => {
   try {
-    const song = await Song.findById(req.params.id).populate('genre', '_id name slug');
+    const song = await Song.findOne({ _id: req.params.id, band: req.currentBand }).populate('genre', '_id name slug');
     if (!song) {
       const err = new Error('Song not found');
       err.status = 404;
@@ -97,7 +99,7 @@ router.get('/:id', async (req, res, next) => {
 // PATCH /songs/:id
 router.patch('/:id', async (req, res, next) => {
   try {
-    const song = await Song.findById(req.params.id);
+    const song = await Song.findOne({ _id: req.params.id, band: req.currentBand });
     if (!song) {
       const err = new Error('Song not found');
       err.status = 404;
@@ -108,7 +110,7 @@ router.patch('/:id', async (req, res, next) => {
     const { title, artist, genre, tags, originalKey, performedKey } = req.body;
 
     if ('genre' in req.body && genre !== null && genre !== undefined) {
-      const genreDoc = await Genre.findById(genre);
+      const genreDoc = await Genre.findOne({ _id: genre, band: req.currentBand });
       if (!genreDoc) {
         const err = new Error('Invalid genre');
         err.status = 422;
@@ -137,7 +139,7 @@ router.patch('/:id', async (req, res, next) => {
 // DELETE /songs/:id
 router.delete('/:id', async (req, res, next) => {
   try {
-    const song = await Song.findById(req.params.id);
+    const song = await Song.findOne({ _id: req.params.id, band: req.currentBand });
     if (!song) {
       const err = new Error('Song not found');
       err.status = 404;

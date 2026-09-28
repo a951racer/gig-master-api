@@ -3,6 +3,8 @@ const router = express.Router();
 const Genre = require('../models/Genre');
 const Song = require('../models/Song');
 const authenticate = require('../middleware/authenticate');
+const bandScope = require('../middleware/bandScope');
+const { requireBandAdmin } = require('../middleware/authorize');
 
 function generateSlug(name) {
   return name.toLowerCase().trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
@@ -12,18 +14,18 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// GET /genres — public
-router.get('/', async (req, res, next) => {
+// GET /genres — current band's genres (member read)
+router.get('/', authenticate, bandScope, async (req, res, next) => {
   try {
-    const genres = await Genre.find({}, { _id: 1, name: 1, slug: 1 }).sort({ name: 1 });
+    const genres = await Genre.find({ band: req.currentBand }, { _id: 1, name: 1, slug: 1 }).sort({ name: 1 });
     res.json(genres);
   } catch (err) {
     next(err);
   }
 });
 
-// POST /genres — requires auth
-router.post('/', authenticate, async (req, res, next) => {
+// POST /genres — band admin
+router.post('/', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
   try {
     const { name } = req.body;
 
@@ -36,7 +38,10 @@ router.post('/', authenticate, async (req, res, next) => {
     }
 
     const escapedName = escapeRegex(name.trim());
-    const existing = await Genre.findOne({ name: { $regex: new RegExp('^' + escapedName + '$', 'i') } });
+    const existing = await Genre.findOne({
+      band: req.currentBand,
+      name: { $regex: new RegExp('^' + escapedName + '$', 'i') },
+    });
     if (existing) {
       const err = new Error('Genre already exists');
       err.status = 409;
@@ -45,17 +50,17 @@ router.post('/', authenticate, async (req, res, next) => {
     }
 
     const slug = generateSlug(name);
-    const genre = await Genre.create({ name: name.trim(), slug });
+    const genre = await Genre.create({ name: name.trim(), slug, band: req.currentBand });
     res.status(201).json({ _id: genre._id, name: genre.name, slug: genre.slug });
   } catch (err) {
     next(err);
   }
 });
 
-// PATCH /genres/:id — requires auth
-router.patch('/:id', authenticate, async (req, res, next) => {
+// PATCH /genres/:id — band admin
+router.patch('/:id', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
   try {
-    const genre = await Genre.findById(req.params.id);
+    const genre = await Genre.findOne({ _id: req.params.id, band: req.currentBand });
     if (!genre) {
       const err = new Error('Genre not found');
       err.status = 404;
@@ -74,6 +79,7 @@ router.patch('/:id', authenticate, async (req, res, next) => {
 
     const escapedName = escapeRegex(name.trim());
     const existing = await Genre.findOne({
+      band: req.currentBand,
       name: { $regex: new RegExp('^' + escapedName + '$', 'i') },
       _id: { $ne: genre._id },
     });
@@ -94,10 +100,10 @@ router.patch('/:id', authenticate, async (req, res, next) => {
   }
 });
 
-// DELETE /genres/:id — requires auth
-router.delete('/:id', authenticate, async (req, res, next) => {
+// DELETE /genres/:id — band admin
+router.delete('/:id', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
   try {
-    const genre = await Genre.findById(req.params.id);
+    const genre = await Genre.findOne({ _id: req.params.id, band: req.currentBand });
     if (!genre) {
       const err = new Error('Genre not found');
       err.status = 404;
@@ -105,7 +111,7 @@ router.delete('/:id', authenticate, async (req, res, next) => {
       return next(err);
     }
 
-    const songUsingGenre = await Song.findOne({ genre: req.params.id });
+    const songUsingGenre = await Song.findOne({ genre: req.params.id, band: req.currentBand });
     if (songUsingGenre) {
       return res.status(409).json({
         error: { code: 'GENRE_IN_USE', message: 'Genre is in use by one or more songs' },
