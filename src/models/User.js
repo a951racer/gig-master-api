@@ -21,8 +21,29 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    role: {
+      type: String,
+      enum: ['user', 'system_administrator'],
+      default: 'user',
+    },
+    bands: [
+      {
+        band: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Band',
+          required: true,
+        },
+        isAdmin: {
+          type: Boolean,
+          default: false,
+        },
+      },
+    ],
   },
   { timestamps: true }
 );
+
+// Multikey index so "members of band X" is an indexed lookup, not a collection scan
+userSchema.index({ 'bands.band': 1 });
 
 module.exports = mongoose.model('User', userSchema);

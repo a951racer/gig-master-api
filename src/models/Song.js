@@ -2,6 +2,11 @@ const mongoose = require('mongoose');
 
 const songSchema = new mongoose.Schema(
   {
+    band: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Band',
+      required: true,
+    },
     title: {
       type: String,
       required: true,
@@ -33,6 +38,7 @@ const songSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+songSchema.index({ band: 1 });
 songSchema.index({ title: 'text' });
 songSchema.index({ genre: 1 });
 songSchema.index({ tags: 1 });

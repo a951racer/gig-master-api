@@ -2,6 +2,11 @@ const mongoose = require('mongoose');
 
 const playlistSchema = new mongoose.Schema(
   {
+    band: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Band',
+      required: true,
+    },
     name: {
       type: String,
       required: true,
@@ -18,5 +23,7 @@ const playlistSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+playlistSchema.index({ band: 1 });
 
 module.exports = mongoose.model('Playlist', playlistSchema);
