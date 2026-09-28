@@ -2,6 +2,11 @@ const mongoose = require('mongoose');
 
 const gigSchema = new mongoose.Schema(
   {
+    band: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Band',
+      required: true,
+    },
     name: {
       type: String,
       required: true,
@@ -28,6 +33,7 @@ const gigSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+gigSchema.index({ band: 1 });
 gigSchema.index({ date: -1 });
 
 module.exports = mongoose.model('Gig', gigSchema);
