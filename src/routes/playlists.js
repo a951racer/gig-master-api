@@ -2,15 +2,17 @@ const express = require('express');
 const Playlist = require('../models/Playlist');
 const Song = require('../models/Song');
 const authenticate = require('../middleware/authenticate');
+const bandScope = require('../middleware/bandScope');
 
 const router = express.Router();
 
 router.use(authenticate);
+router.use(bandScope);
 
 // GET /playlists — all playlists with song count (no full song docs)
 router.get('/', async (req, res, next) => {
   try {
-    const playlists = await Playlist.find().lean();
+    const playlists = await Playlist.find({ band: req.currentBand }).lean();
     const result = playlists.map((p) => ({ ...p, songCount: p.songs.length }));
     res.json(result);
   } catch (err) {
@@ -31,7 +33,7 @@ router.post('/', async (req, res, next) => {
       return next(err);
     }
 
-    const playlist = new Playlist({ name, description });
+    const playlist = new Playlist({ band: req.currentBand, name, description });
     await playlist.save();
     res.status(201).json(playlist);
   } catch (err) {
@@ -42,7 +44,7 @@ router.post('/', async (req, res, next) => {
 // GET /playlists/:id — with songs fully populated (including genre)
 router.get('/:id', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id).populate({
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand }).populate({
       path: 'songs',
       populate: { path: 'genre', select: '_id name slug' },
     });
@@ -61,7 +63,7 @@ router.get('/:id', async (req, res, next) => {
 // PATCH /playlists/:id — update metadata (songs NOT populated)
 router.patch('/:id', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id);
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
     if (!playlist) {
       const err = new Error('Playlist not found');
       err.status = 404;
@@ -83,7 +85,7 @@ router.patch('/:id', async (req, res, next) => {
 // DELETE /playlists/:id
 router.delete('/:id', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id);
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
     if (!playlist) {
       const err = new Error('Playlist not found');
       err.status = 404;
@@ -101,7 +103,7 @@ router.delete('/:id', async (req, res, next) => {
 // POST /playlists/:id/songs — add a song
 router.post('/:id/songs', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id);
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
     if (!playlist) {
       const err = new Error('Playlist not found');
       err.status = 404;
@@ -110,7 +112,7 @@ router.post('/:id/songs', async (req, res, next) => {
     }
 
     const { songId } = req.body;
-    const song = await Song.findById(songId);
+    const song = await Song.findOne({ _id: songId, band: req.currentBand });
     if (!song) {
       const err = new Error('Song not found');
       err.status = 404;
@@ -129,7 +131,7 @@ router.post('/:id/songs', async (req, res, next) => {
 // DELETE /playlists/:id/songs/:songId — remove a song
 router.delete('/:id/songs/:songId', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id);
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
     if (!playlist) {
       const err = new Error('Playlist not found');
       err.status = 404;
@@ -148,7 +150,7 @@ router.delete('/:id/songs/:songId', async (req, res, next) => {
 // PUT /playlists/:id/songs — reorder (full replacement, must match current set)
 router.put('/:id/songs', async (req, res, next) => {
   try {
-    const playlist = await Playlist.findById(req.params.id);
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
     if (!playlist) {
       const err = new Error('Playlist not found');
       err.status = 404;

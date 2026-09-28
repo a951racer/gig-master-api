@@ -1,0 +1,222 @@
+// src/routes/admin.js
+//
+// System-administrator router (Task 9.1 — Requirements 3.3, 11.1–11.5).
+//
+// Every route in this router is band-independent and gated by
+// `authenticate → requireSystemAdmin`, so only a caller whose token carries
+// `role === 'system_administrator'` may reach any handler (Req 3.4, 11.5).
+// The router is mounted under `/admin` (mounting is Task 11.1, not done here).
+//
+// Error responses follow the project convention `{ error: { code, message } }`
+// with 422 carrying `error.fields` (see middleware/errorHandler + validate).
+//
+// Seed genre list store (Req 11.4 / 10.4): the master `Seed_Genre_List` is
+// currently a hardcoded `DEFAULT_GENRES` array in `config/seedGenres.js`. A
+// persistent store is out of scope for this task, so this router keeps a
+// pragmatic module-level (in-memory) copy of the list, initialized from
+// `seedGenres.DEFAULT_GENRES`. `GET /admin/seed-genres` returns the current
+// maintained list and `PUT /admin/seed-genres` validates and replaces it. The
+// list is used to seed NEW bands; because `seedBandGenres` reads from the
+// config array, edits made here affect this router's view of the list rather
+// than retroactively rewriting existing bands, which matches Req 10.4 (seed
+// edits are not retroactive). This is intentionally simple — persisting the
+// list (e.g. a SeedGenre collection) is deferred.
+
+const express = require('express');
+
+const User = require('../models/User');
+const Band = require('../models/Band');
+const authService = require('../services/authService');
+const membershipService = require('../services/membershipService');
+const seedGenres = require('../config/seedGenres');
+const authenticate = require('../middleware/authenticate');
+const { requireSystemAdmin } = require('../middleware/authorize');
+const { validateFields } = require('../middleware/validate');
+
+const router = express.Router();
+
+const ROLES = ['user', 'system_administrator'];
+
+// In-memory maintained copy of the master Seed_Genre_List (see header note).
+let seedGenreList = [...seedGenres.DEFAULT_GENRES];
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+// All admin routes are band-independent and require the system_administrator role.
+router.use(authenticate, requireSystemAdmin);
+
+// POST /admin/users — create a user, optionally with a role (Req 11.1, 3.3).
+router.post('/users', async (req, res, next) => {
+  try {
+    const { email, password, role } = req.body;
+    const errors = {};
+
+    if (!email || !isValidEmail(email)) errors.email = 'Must be a valid email address';
+    if (!password || password.length < 8) errors.password = 'Must be at least 8 characters';
+    if (role !== undefined && !ROLES.includes(role)) {
+      errors.role = `Must be one of: ${ROLES.join(', ')}`;
+    }
+
+    if (Object.keys(errors).length) {
+      validateFields(errors);
+    }
+
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(409).json({ error: { code: 'EMAIL_TAKEN', message: 'Email already in use' } });
+    }
+
+    const passwordHash = await authService.hashPassword(password);
+    const user = await User.create({
+      email: email.toLowerCase(),
+      passwordHash,
+      role: role === 'system_administrator' ? 'system_administrator' : 'user',
+    });
+
+    return res.status(201).json({ id: user._id, email: user.email, role: user.role });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /admin/users/:id/role — assign a role to an existing user (Req 11.1, 3.3).
+router.patch('/users/:id/role', async (req, res, next) => {
+  try {
+    const { role } = req.body;
+
+    if (!ROLES.includes(role)) {
+      validateFields({ role: `Must be one of: ${ROLES.join(', ')}` });
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    user.role = role;
+    await user.save();
+
+    return res.status(200).json({ id: user._id, email: user.email, role: user.role });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /admin/bands — create a band for any user and make them its administrator (Req 11.2).
+router.post('/bands', async (req, res, next) => {
+  try {
+    const { name, administrator } = req.body;
+    const errors = {};
+
+    if (!name || !name.trim()) errors.name = 'Name is required';
+    if (!administrator) errors.administrator = 'Administrator user id is required';
+
+    if (Object.keys(errors).length) {
+      validateFields(errors);
+    }
+
+    const adminUser = await User.findById(administrator);
+    if (!adminUser) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Administrator user not found' } });
+    }
+
+    // Band.administrator is required at creation; create it pointing at the
+    // target user, then run setAdministrator to establish the single-admin
+    // membership invariant (adds the membership with isAdmin: true).
+    const band = await Band.create({ name: name.trim(), administrator: adminUser._id });
+    await membershipService.setAdministrator(band._id, adminUser._id);
+    await seedGenres.seedBandGenres(band._id);
+
+    return res.status(201).json({ id: band._id, name: band.name });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /admin/bands/:id/members — add a member directly, no join request (Req 11.3).
+router.post('/bands/:id/members', async (req, res, next) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      validateFields({ userId: 'User id is required' });
+    }
+
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    await membershipService.addMember(band._id, user._id);
+
+    return res.status(200).json({ message: 'Member added' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /admin/bands/:id/administrator — designate/reassign the administrator (Req 11.3).
+router.patch('/bands/:id/administrator', async (req, res, next) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      validateFields({ userId: 'User id is required' });
+    }
+
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    await membershipService.setAdministrator(band._id, user._id);
+
+    return res.status(200).json({ message: 'Administrator updated' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /admin/seed-genres — return the current master Seed_Genre_List (Req 11.4, 10.4).
+router.get('/seed-genres', (req, res) => {
+  return res.status(200).json({ genres: [...seedGenreList] });
+});
+
+// PUT /admin/seed-genres — replace the maintained Seed_Genre_List (Req 11.4, 10.4).
+router.put('/seed-genres', (req, res, next) => {
+  try {
+    const { genres } = req.body;
+
+    if (!Array.isArray(genres)) {
+      validateFields({ genres: 'Must be an array of genre names' });
+    }
+
+    const cleaned = genres
+      .map((g) => (typeof g === 'string' ? g.trim() : ''))
+      .filter((g) => g.length > 0);
+
+    if (cleaned.length !== genres.length) {
+      validateFields({ genres: 'Every genre must be a non-empty string' });
+    }
+
+    seedGenreList = cleaned;
+
+    return res.status(200).json({ genres: [...seedGenreList] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
