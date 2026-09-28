@@ -13,8 +13,24 @@ async function comparePassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
-function generateAccessToken(userId) {
-  return jwt.sign({ sub: userId }, ACCESS_TOKEN_SECRET, { expiresIn: '24h' });
+function buildBandsClaim(user) {
+  return (user.bands || []).map((m) => ({
+    id: m.band._id.toString(),
+    name: m.band.name,
+    isAdmin: m.isAdmin,
+  }));
+}
+
+function generateAccessToken(user) {
+  return jwt.sign(
+    {
+      sub: user._id.toString(),
+      role: user.role,
+      bands: buildBandsClaim(user),
+    },
+    ACCESS_TOKEN_SECRET,
+    { expiresIn: '24h' }
+  );
 }
 
 function generateRefreshToken() {
@@ -28,6 +44,7 @@ function hashToken(token) {
 module.exports = {
   hashPassword,
   comparePassword,
+  buildBandsClaim,
   generateAccessToken,
   generateRefreshToken,
   hashToken,
