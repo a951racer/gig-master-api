@@ -68,7 +68,9 @@ router.post('/login', async (req, res, next) => {
       return res.status(401).json({ error: { code: 'INVALID_CREDENTIALS', message: 'Invalid email or password' } });
     }
 
-    const accessToken = authService.generateAccessToken(user._id.toString());
+    await user.populate('bands.band', 'name');
+
+    const accessToken = authService.generateAccessToken(user);
     const refreshToken = authService.generateRefreshToken();
     const tokenHash = authService.hashToken(refreshToken);
 
@@ -104,7 +106,12 @@ router.post('/refresh', async (req, res, next) => {
       return res.status(401).json({ error: { code: 'TOKEN_INVALID', message: 'Invalid or expired refresh token' } });
     }
 
-    const accessToken = authService.generateAccessToken(record.userId.toString());
+    const user = await User.findById(record.userId).populate('bands.band', 'name');
+    if (!user) {
+      return res.status(401).json({ error: { code: 'TOKEN_INVALID', message: 'Invalid or expired refresh token' } });
+    }
+
+    const accessToken = authService.generateAccessToken(user);
 
     return res.status(200).json({ accessToken });
   } catch (err) {
