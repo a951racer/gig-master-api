@@ -21,6 +21,11 @@
  * to the database or run the migration.
  */
 
+// Load environment variables (e.g. MONGODB_URI) when run standalone via
+// `node src/scripts/migrateToBands.js`, mirroring server.js. Without this the
+// script's connectDB() sees an undefined MONGODB_URI.
+require('dotenv').config();
+
 const mongoose = require('mongoose');
 
 const connectDB = require('../config/db');
