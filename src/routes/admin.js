@@ -118,6 +118,19 @@ router.patch('/users/:id/role', async (req, res, next) => {
   }
 });
 
+// GET /admin/bands — list all bands for admin UIs (e.g. band pickers).
+// Sysadmin-only. Returns { id, name, administrator } sorted by name.
+router.get('/bands', async (req, res, next) => {
+  try {
+    const bands = await Band.find({}, { name: 1, administrator: 1 }).sort({ name: 1 });
+    return res.status(200).json(
+      bands.map((b) => ({ id: b._id, name: b.name, administrator: b.administrator }))
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /admin/bands — create a band for any user and make them its administrator (Req 11.2).
 router.post('/bands', async (req, res, next) => {
   try {
@@ -198,6 +211,32 @@ router.patch('/bands/:id/administrator', async (req, res, next) => {
     await membershipService.setAdministrator(band._id, user._id);
 
     return res.status(200).json({ message: 'Administrator updated' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /admin/bands/:id — rename any band (sysadmin). Unlike the band-admin
+// PATCH /bands/:id (which is scoped to the caller's current band), this looks
+// up the band by :id directly so a sysadmin can rename any band from the
+// admin UI without it being their current band.
+router.patch('/bands/:id', async (req, res, next) => {
+  try {
+    const { name } = req.body;
+
+    if (!name || !name.trim()) {
+      validateFields({ name: 'Name is required' });
+    }
+
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+
+    band.name = name.trim();
+    await band.save();
+
+    return res.status(200).json({ id: band._id, name: band.name });
   } catch (err) {
     next(err);
   }
