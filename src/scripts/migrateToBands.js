@@ -111,6 +111,43 @@ async function backfillResources(legacyBandId) {
 }
 
 /**
+ * Drop stale global-unique indexes on the `genres` collection that predate the
+ * Bands feature. Before Bands, Genre had global unique indexes on `name` and
+ * `slug` (name_1 / slug_1). The schema now uses per-band compound unique
+ * indexes ({ band, name } / { band, slug }), but Mongoose never drops indexes
+ * that already exist in the DB — so the old global-unique indexes linger and
+ * wrongly reject per-band duplicate genre names (every band gets its own copy
+ * of the seed genres, e.g. "Rock").
+ *
+ * Idempotent: only drops an index if it is present; safe to re-run and safe on
+ * fresh databases that never had the old indexes.
+ *
+ * @returns {Promise<string[]>} names of indexes that were dropped
+ */
+async function dropStaleGenreIndexes() {
+  const STALE_INDEXES = ['name_1', 'slug_1'];
+  const collection = Genre.collection;
+  const dropped = [];
+
+  let existing;
+  try {
+    existing = await collection.indexes();
+  } catch (err) {
+    // If the collection does not exist yet (fresh DB), there is nothing to drop.
+    return dropped;
+  }
+  const existingNames = new Set(existing.map((i) => i.name));
+
+  for (const name of STALE_INDEXES) {
+    if (existingNames.has(name)) {
+      await collection.dropIndex(name);
+      dropped.push(name);
+    }
+  }
+  return dropped;
+}
+
+/**
  * Run the migration. Assumes a live mongoose connection.
  *
  * @returns {Promise<object>} a summary of what changed (useful for tests/logs)
@@ -132,6 +169,10 @@ async function runMigration() {
   const { legacyBand, created: legacyBandCreated } =
     await findOrCreateLegacyBand(admin);
 
+  // 4b. Drop stale pre-Bands global-unique genre indexes (idempotent) so that
+  //     per-band duplicate genre names are allowed.
+  const droppedGenreIndexes = await dropStaleGenreIndexes();
+
   // 5. Backfill resources missing a `band` into the Legacy Band (idempotent).
   const backfillCounts = await backfillResources(legacyBand._id);
 
@@ -141,6 +182,7 @@ async function runMigration() {
     roleChanged,
     legacyBandId: legacyBand._id.toString(),
     legacyBandCreated,
+    droppedGenreIndexes,
     backfillCounts,
   };
 }
@@ -167,6 +209,13 @@ async function main() {
     console.log(
       `  Legacy Band: ${summary.legacyBandId} — ` +
         `${summary.legacyBandCreated ? 'created' : 'found existing'}`
+    );
+    // eslint-disable-next-line no-console
+    console.log(
+      `  dropped stale genre indexes: ` +
+        (summary.droppedGenreIndexes.length
+          ? summary.droppedGenreIndexes.join(', ')
+          : 'none')
     );
     const { backfillCounts } = summary;
     // eslint-disable-next-line no-console
@@ -218,5 +267,6 @@ module.exports.runMigration = runMigration;
 module.exports.designateSystemAdministrator = designateSystemAdministrator;
 module.exports.findOrCreateLegacyBand = findOrCreateLegacyBand;
 module.exports.backfillResources = backfillResources;
+module.exports.dropStaleGenreIndexes = dropStaleGenreIndexes;
 module.exports.INITIAL_SYSADMIN_EMAIL = INITIAL_SYSADMIN_EMAIL;
 module.exports.LEGACY_BAND_NAME = LEGACY_BAND_NAME;
