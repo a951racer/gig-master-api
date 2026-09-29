@@ -47,6 +47,20 @@ function isValidEmail(email) {
 // All admin routes are band-independent and require the system_administrator role.
 router.use(authenticate, requireSystemAdmin);
 
+// GET /admin/users — list all users for admin UIs (e.g. the assign-role picker).
+// Sysadmin-only (gated by the router-level requireSystemAdmin). Returns a lean
+// projection sorted by email; no password or token fields are exposed.
+router.get('/users', async (req, res, next) => {
+  try {
+    const users = await User.find({}, { email: 1, role: 1 }).sort({ email: 1 });
+    return res.status(200).json(
+      users.map((u) => ({ id: u._id, email: u.email, role: u.role }))
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /admin/users — create a user, optionally with a role (Req 11.1, 3.3).
 router.post('/users', async (req, res, next) => {
   try {
