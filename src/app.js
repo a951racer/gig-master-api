@@ -7,6 +7,8 @@ const genresRouter = require('./routes/genres');
 const songsRouter = require('./routes/songs');
 const playlistsRouter = require('./routes/playlists');
 const gigsRouter = require('./routes/gigs');
+const bandsRouter = require('./routes/bands');
+const adminRouter = require('./routes/admin');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
@@ -20,7 +22,7 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:5173',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Band-Id'],
 }));
 
 app.use(express.json());
@@ -39,6 +41,8 @@ app.use('/genres', genresRouter);
 app.use('/songs', songsRouter);
 app.use('/playlists', playlistsRouter);
 app.use('/gigs', gigsRouter);
+app.use('/bands', bandsRouter);
+app.use('/admin', adminRouter);
 
 app.use(errorHandler);
 
