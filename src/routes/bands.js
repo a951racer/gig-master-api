@@ -78,6 +78,38 @@ router.post('/', authenticate, async (req, res, next) => {
   }
 });
 
+// PATCH /bands/:id — rename the current band (band admin only).
+//
+// Guarded by bandScope + requireBandAdmin so only the administrator of the
+// current band (or a system_administrator) may rename it. The band is looked up
+// scoped to req.currentBand so :id must be the current band. Because the band
+// name is embedded in the JWT bands[] claim, the client should refresh its
+// token after a successful rename so the switcher reflects the new name.
+router.patch('/:id', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
+  try {
+    const { name } = req.body;
+
+    if (!name || !name.trim()) {
+      validateFields({ name: 'Name is required' });
+    }
+
+    const band = await Band.findOne({ _id: req.currentBand });
+    if (!band) {
+      const err = new Error('Band not found');
+      err.status = 404;
+      err.code = 'NOT_FOUND';
+      return next(err);
+    }
+
+    band.name = name.trim();
+    await band.save();
+
+    return res.status(200).json({ id: band._id, name: band.name });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /me/bands — the caller's canonical memberships, read from the DB (Req 8.6).
 //
 // This is the authoritative membership list (used for admin/debug); the client
