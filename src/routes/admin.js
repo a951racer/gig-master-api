@@ -233,6 +233,40 @@ router.get('/bands', async (req, res, next) => {
   }
 });
 
+// GET /admin/bands/:id/members — list any band's members (sysadmin).
+//
+// Unlike GET /bands/:id/members (band-scoped to the caller's current band),
+// this is band-independent: a sysadmin can view the membership of any band by
+// id from the admin UI. Members are found via the indexed `bands.band` lookup;
+// the `bands.$` projection returns the matching membership entry so each
+// member's isAdmin flag (the band-administrator designator) comes back too.
+// Returns [{ id, email, firstName, lastName, isAdmin }] sorted by email.
+router.get('/bands/:id/members', async (req, res, next) => {
+  try {
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+
+    const users = await User.find(
+      { 'bands.band': band._id },
+      { email: 1, firstName: 1, lastName: 1, 'bands.$': 1 }
+    ).sort({ email: 1 });
+
+    const members = users.map((u) => ({
+      id: u._id,
+      email: u.email,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      isAdmin: !!(u.bands && u.bands[0] && u.bands[0].isAdmin),
+    }));
+
+    return res.status(200).json(members);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /admin/bands — create a band for any user and make them its administrator (Req 11.2).
 router.post('/bands', async (req, res, next) => {
   try {
