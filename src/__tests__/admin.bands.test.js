@@ -5,6 +5,11 @@ const app = require('../app');
 const User = require('../models/User');
 const Band = require('../models/Band');
 const Genre = require('../models/Genre');
+const Song = require('../models/Song');
+const Playlist = require('../models/Playlist');
+const Gig = require('../models/Gig');
+const JoinRequest = require('../models/JoinRequest');
+const Invite = require('../models/Invite');
 const authService = require('../services/authService');
 const seedGenres = require('../config/seedGenres');
 
@@ -58,6 +63,11 @@ afterEach(async () => {
     User.deleteMany({}),
     Band.deleteMany({}),
     Genre.deleteMany({}),
+    Song.deleteMany({}),
+    Playlist.deleteMany({}),
+    Gig.deleteMany({}),
+    JoinRequest.deleteMany({}),
+    Invite.deleteMany({}),
   ]);
 });
 
@@ -530,5 +540,166 @@ describe('GET /admin/bands/:id/members (sysadmin band membership view)', () => {
     expect(byEmail['plain-member@example.com'].isAdmin).toBe(false);
     // Each member carries id/email and name fields.
     expect(byEmail['owner@example.com'].id).toBeTruthy();
+  });
+});
+
+// Two-stage band deletion (#42): archive → hard-delete with cascade.
+describe('Two-stage band deletion (#42)', () => {
+  let adminToken;
+  let owner;
+
+  // Create an archived-or-not band owned by a fresh user, seeded with one of
+  // each owned resource, and return { bandId, memberId }.
+  async function seedBand(name = 'Doomed Band') {
+    const createRes = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name, administrator: owner._id.toString() });
+    expect(createRes.status).toBe(201);
+    const bandId = createRes.body.id;
+
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const member = await User.create({ email: `member-${name.replace(/\s/g, '')}@ex.com`, passwordHash });
+    await request(app)
+      .post(`/admin/bands/${bandId}/members`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ userId: member._id.toString() });
+
+    await Song.create({ band: bandId, title: 'A Song', artist: 'An Artist' });
+    await Playlist.create({ band: bandId, name: 'A List' });
+    await Gig.create({ band: bandId, name: 'A Gig', date: new Date() });
+    await JoinRequest.create({ band: bandId, user: member._id, status: 'pending' });
+
+    return { bandId, memberId: member._id.toString() };
+  }
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('delete-admin@example.com', 'system_administrator');
+    adminToken = token;
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    owner = await User.create({ email: 'band-owner-del@example.com', passwordHash });
+  });
+
+  it('archive returns 403 for a non-sysadmin caller', async () => {
+    const { token: userToken } = await createUserWithToken('nope-arch@example.com', 'user');
+    const { bandId } = await seedBand('Guard Band');
+
+    const res = await request(app)
+      .post(`/admin/bands/${bandId}/archive`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('archives a band, and it disappears from the members token claim / GET /me/bands', async () => {
+    const { bandId } = await seedBand('Archive Me');
+
+    const archiveRes = await request(app)
+      .post(`/admin/bands/${bandId}/archive`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(archiveRes.status).toBe(200);
+    expect(archiveRes.body.archivedAt).toBeTruthy();
+
+    // The owner (a member+admin of the band) should no longer see it via
+    // GET /me/bands, which excludes archived bands.
+    const ownerLoaded = await User.findById(owner._id).populate('bands.band', 'name archivedAt');
+    const ownerToken = authService.generateAccessToken(ownerLoaded);
+    const meBands = await request(app)
+      .get('/bands/me/bands')
+      .set('Authorization', `Bearer ${ownerToken}`);
+    expect(meBands.status).toBe(200);
+    expect(meBands.body.find((b) => b.id === bandId)).toBeUndefined();
+
+    // And the token claim excludes it too.
+    const claim = authService.buildBandsClaim(ownerLoaded);
+    expect(claim.find((b) => b.id === bandId)).toBeUndefined();
+  });
+
+  it('archiving an already-archived band returns 409 ALREADY_ARCHIVED', async () => {
+    const { bandId } = await seedBand('Twice');
+    await request(app).post(`/admin/bands/${bandId}/archive`).set('Authorization', `Bearer ${adminToken}`);
+
+    const again = await request(app)
+      .post(`/admin/bands/${bandId}/archive`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('ALREADY_ARCHIVED');
+  });
+
+  it('unarchive restores a band (and 409 NOT_ARCHIVED when it was not archived)', async () => {
+    const { bandId } = await seedBand('Restore Me');
+
+    const notArchived = await request(app)
+      .post(`/admin/bands/${bandId}/unarchive`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(notArchived.status).toBe(409);
+    expect(notArchived.body.error.code).toBe('NOT_ARCHIVED');
+
+    await request(app).post(`/admin/bands/${bandId}/archive`).set('Authorization', `Bearer ${adminToken}`);
+    const unarch = await request(app)
+      .post(`/admin/bands/${bandId}/unarchive`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(unarch.status).toBe(200);
+    expect(unarch.body.archivedAt).toBeNull();
+
+    const band = await Band.findById(bandId);
+    expect(band.archivedAt).toBeNull();
+  });
+
+  it('refuses to hard-delete a band that is not archived (409 NOT_ARCHIVED)', async () => {
+    const { bandId } = await seedBand('Not Yet');
+
+    const res = await request(app)
+      .delete(`/admin/bands/${bandId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NOT_ARCHIVED');
+
+    // Nothing was deleted.
+    expect(await Band.findById(bandId)).not.toBeNull();
+    expect(await Song.countDocuments({ band: bandId })).toBe(1);
+  });
+
+  it('hard-deletes an archived band and cascades all owned resources + memberships', async () => {
+    const { bandId, memberId } = await seedBand('Bye Band');
+
+    await request(app).post(`/admin/bands/${bandId}/archive`).set('Authorization', `Bearer ${adminToken}`);
+
+    const res = await request(app)
+      .delete(`/admin/bands/${bandId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+
+    // The band and all owned resources are gone.
+    expect(await Band.findById(bandId)).toBeNull();
+    expect(await Song.countDocuments({ band: bandId })).toBe(0);
+    expect(await Playlist.countDocuments({ band: bandId })).toBe(0);
+    expect(await Gig.countDocuments({ band: bandId })).toBe(0);
+    expect(await Genre.countDocuments({ band: bandId })).toBe(0);
+    expect(await JoinRequest.countDocuments({ band: bandId })).toBe(0);
+
+    // Membership removed from both the owner and the member.
+    const ownerAfter = await User.findById(owner._id);
+    expect(ownerAfter.bands.find((m) => m.band.toString() === bandId)).toBeUndefined();
+    const memberAfter = await User.findById(memberId);
+    expect(memberAfter.bands.find((m) => m.band.toString() === bandId)).toBeUndefined();
+  });
+
+  it('delete returns 403 for a non-sysadmin and 404 for an unknown band', async () => {
+    const { token: userToken } = await createUserWithToken('nope-del@example.com', 'user');
+    const { bandId } = await seedBand('Perms Band');
+    await request(app).post(`/admin/bands/${bandId}/archive`).set('Authorization', `Bearer ${adminToken}`);
+
+    const forbidden = await request(app)
+      .delete(`/admin/bands/${bandId}`)
+      .set('Authorization', `Bearer ${userToken}`);
+    expect(forbidden.status).toBe(403);
+
+    const missingId = new mongoose.Types.ObjectId().toString();
+    const notFound = await request(app)
+      .delete(`/admin/bands/${missingId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(notFound.status).toBe(404);
   });
 });

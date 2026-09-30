@@ -14,11 +14,17 @@ async function comparePassword(password, hash) {
 }
 
 function buildBandsClaim(user) {
-  return (user.bands || []).map((m) => ({
-    id: m.band._id.toString(),
-    name: m.band.name,
-    isAdmin: m.isAdmin,
-  }));
+  // Exclude memberships whose band is unpopulated/missing or archived: archived
+  // bands must not appear in the token claim (they drop out of the switcher and
+  // can't be selected as the current band). Callers populate bands.band with at
+  // least { name, archivedAt } for this filter to work.
+  return (user.bands || [])
+    .filter((m) => m.band && m.band._id && !m.band.archivedAt)
+    .map((m) => ({
+      id: m.band._id.toString(),
+      name: m.band.name,
+      isAdmin: m.isAdmin,
+    }));
 }
 
 function generateAccessToken(user) {

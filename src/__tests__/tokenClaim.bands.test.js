@@ -110,3 +110,35 @@ describe('authService token claim (Property 9)', () => {
     expect(buildBandsClaim(user)).toEqual([]);
   });
 });
+
+// Archived bands (#42): buildBandsClaim must exclude memberships whose band is
+// archived (archivedAt set) or unpopulated, so archived bands drop out of the
+// switcher and can't be selected as a current band.
+describe('authService token claim excludes archived bands (#42)', () => {
+  it('filters out memberships whose band has archivedAt set', () => {
+    const user = {
+      _id: fakeObjectId('abc123'),
+      role: 'user',
+      bands: [
+        { band: { _id: fakeObjectId('active1'), name: 'Active', archivedAt: null }, isAdmin: true },
+        { band: { _id: fakeObjectId('archived1'), name: 'Archived', archivedAt: new Date() }, isAdmin: false },
+      ],
+    };
+
+    const claim = buildBandsClaim(user);
+    expect(claim).toEqual([{ id: 'active1', name: 'Active', isAdmin: true }]);
+  })
+
+  it('filters out memberships whose band did not populate', () => {
+    const user = {
+      _id: fakeObjectId('abc123'),
+      role: 'user',
+      bands: [
+        { band: null, isAdmin: false },
+        { band: { _id: fakeObjectId('ok'), name: 'Ok', archivedAt: null }, isAdmin: false },
+      ],
+    };
+
+    expect(buildBandsClaim(user)).toEqual([{ id: 'ok', name: 'Ok', isAdmin: false }])
+  })
+})

@@ -12,6 +12,19 @@ const bandSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
+    // Soft-delete / archive (stage 1 of the two-stage delete). A band must be
+    // archived before it can be hard-deleted. Archived bands are filtered out
+    // of members' band lists / token claim so they drop out of normal use,
+    // while their data stays intact and archiving is fully reversible.
+    archivedAt: {
+      type: Date,
+      default: null,
+    },
+    archivedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
   },
   { timestamps: true }
 );

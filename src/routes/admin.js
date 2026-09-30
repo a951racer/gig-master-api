@@ -26,6 +26,12 @@ const express = require('express');
 
 const User = require('../models/User');
 const Band = require('../models/Band');
+const Song = require('../models/Song');
+const Playlist = require('../models/Playlist');
+const Gig = require('../models/Gig');
+const Genre = require('../models/Genre');
+const JoinRequest = require('../models/JoinRequest');
+const Invite = require('../models/Invite');
 const authService = require('../services/authService');
 const membershipService = require('../services/membershipService');
 const seedGenres = require('../config/seedGenres');
@@ -224,9 +230,14 @@ router.patch('/users/:id', async (req, res, next) => {
 // Sysadmin-only. Returns { id, name, administrator } sorted by name.
 router.get('/bands', async (req, res, next) => {
   try {
-    const bands = await Band.find({}, { name: 1, administrator: 1 }).sort({ name: 1 });
+    const bands = await Band.find({}, { name: 1, administrator: 1, archivedAt: 1 }).sort({ name: 1 });
     return res.status(200).json(
-      bands.map((b) => ({ id: b._id, name: b.name, administrator: b.administrator }))
+      bands.map((b) => ({
+        id: b._id,
+        name: b.name,
+        administrator: b.administrator,
+        archivedAt: b.archivedAt || null,
+      }))
     );
   } catch (err) {
     next(err);
@@ -373,6 +384,111 @@ router.patch('/bands/:id', async (req, res, next) => {
     await band.save();
 
     return res.status(200).json({ id: band._id, name: band.name });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Two-stage band deletion (#42). A band must be ARCHIVED (soft delete) before
+// it can be hard-deleted with cascade. Both stages are sysadmin-only.
+
+// POST /admin/bands/:id/archive — stage 1: soft-delete / archive a band.
+//
+// Sets archivedAt/archivedBy. Archived bands are filtered out of members' band
+// lists and the token claim (see authService.buildBandsClaim and
+// GET /me/bands), so they drop out of the switcher on the next token refresh
+// and can no longer be selected as a current band — while their data stays
+// intact and archiving is fully reversible (see unarchive). Returns 409 if the
+// band is already archived.
+router.post('/bands/:id/archive', async (req, res, next) => {
+  try {
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+    if (band.archivedAt) {
+      return res.status(409).json({ error: { code: 'ALREADY_ARCHIVED', message: 'Band is already archived' } });
+    }
+
+    band.archivedAt = new Date();
+    band.archivedBy = req.user._id;
+    await band.save();
+
+    return res.status(200).json({ id: band._id, name: band.name, archivedAt: band.archivedAt });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /admin/bands/:id/unarchive — reverse an archive, restoring the band to
+// normal use. Clears archivedAt/archivedBy. Returns 409 if not archived.
+router.post('/bands/:id/unarchive', async (req, res, next) => {
+  try {
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+    if (!band.archivedAt) {
+      return res.status(409).json({ error: { code: 'NOT_ARCHIVED', message: 'Band is not archived' } });
+    }
+
+    band.archivedAt = null;
+    band.archivedBy = null;
+    await band.save();
+
+    return res.status(200).json({ id: band._id, name: band.name, archivedAt: null });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /admin/bands/:id — stage 2: hard-delete a band with cascade.
+//
+// Only permitted once the band is ARCHIVED (409 NOT_ARCHIVED otherwise), so a
+// destructive cascade always follows a deliberate archive step. Atomically
+// (inside a transaction where the deployment supports one — see
+// membershipService.withOptionalTransaction) deletes all resources the band
+// owns — Songs, Playlists, Gigs, Genres, JoinRequests, Invites — removes the
+// band from every user's bands[] membership, and finally deletes the Band.
+router.delete('/bands/:id', async (req, res, next) => {
+  try {
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+    if (!band.archivedAt) {
+      return res.status(409).json({
+        error: {
+          code: 'NOT_ARCHIVED',
+          message: 'Band must be archived before it can be deleted',
+        },
+      });
+    }
+
+    const bandId = band._id;
+
+    await membershipService.withOptionalTransaction(async (session) => {
+      const opts = session ? { session } : {};
+      // Delete all band-owned resources.
+      await Promise.all([
+        Song.deleteMany({ band: bandId }, opts),
+        Playlist.deleteMany({ band: bandId }, opts),
+        Gig.deleteMany({ band: bandId }, opts),
+        Genre.deleteMany({ band: bandId }, opts),
+        JoinRequest.deleteMany({ band: bandId }, opts),
+        Invite.deleteMany({ band: bandId }, opts),
+      ]);
+      // Remove the band from every user's membership list.
+      await User.updateMany(
+        { 'bands.band': bandId },
+        { $pull: { bands: { band: bandId } } },
+        opts
+      );
+      // Finally remove the band itself.
+      await Band.deleteOne({ _id: bandId }, opts);
+    });
+
+    return res.status(200).json({ message: 'Band deleted' });
   } catch (err) {
     next(err);
   }

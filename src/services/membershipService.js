@@ -207,4 +207,5 @@ module.exports = {
   addMember,
   removeMember,
   setAdministrator,
+  withOptionalTransaction,
 };
