@@ -465,3 +465,70 @@ describe('PATCH /admin/users/:id — admin edit user (#40)', () => {
     expect(res.body.role).toBe('user');
   });
 });
+
+// GET /admin/bands/:id/members — sysadmin views any band's members with the
+// band-administrator designator (isAdmin).
+describe('GET /admin/bands/:id/members (sysadmin band membership view)', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('members-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  it('returns 403 FORBIDDEN for a non-sysadmin caller', async () => {
+    const { token: userToken } = await createUserWithToken('member-peeker@example.com', 'user');
+    const someBandId = new mongoose.Types.ObjectId().toString();
+
+    const res = await request(app)
+      .get(`/admin/bands/${someBandId}/members`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('returns 404 for an unknown band id', async () => {
+    const missingId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .get(`/admin/bands/${missingId}/members`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('lists members with the administrator flagged isAdmin: true', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const owner = await User.create({ email: 'owner@example.com', passwordHash });
+    const plain = await User.create({ email: 'plain-member@example.com', passwordHash });
+
+    // Create a band owned by `owner`, then add `plain` as a regular member.
+    const createRes = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'The Members Test', administrator: owner._id.toString() });
+    expect(createRes.status).toBe(201);
+    const bandId = createRes.body.id;
+
+    const addRes = await request(app)
+      .post(`/admin/bands/${bandId}/members`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ userId: plain._id.toString() });
+    expect(addRes.status).toBe(200);
+
+    const res = await request(app)
+      .get(`/admin/bands/${bandId}/members`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toHaveLength(2);
+
+    const byEmail = Object.fromEntries(res.body.map((m) => [m.email, m]));
+    expect(byEmail['owner@example.com'].isAdmin).toBe(true);
+    expect(byEmail['plain-member@example.com'].isAdmin).toBe(false);
+    // Each member carries id/email and name fields.
+    expect(byEmail['owner@example.com'].id).toBeTruthy();
+  });
+});
