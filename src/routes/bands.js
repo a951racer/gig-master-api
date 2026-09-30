@@ -137,12 +137,14 @@ router.get('/:id/members', authenticate, bandScope, async (req, res, next) => {
   try {
     const users = await User.find(
       { 'bands.band': req.currentBand },
-      { email: 1, 'bands.$': 1 }
+      { email: 1, firstName: 1, lastName: 1, 'bands.$': 1 }
     );
 
     const members = users.map((u) => ({
       id: u._id,
       email: u.email,
+      firstName: u.firstName,
+      lastName: u.lastName,
       isAdmin: !!(u.bands && u.bands[0] && u.bands[0].isAdmin),
     }));
 

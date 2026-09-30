@@ -52,9 +52,15 @@ router.use(authenticate, requireSystemAdmin);
 // projection sorted by email; no password or token fields are exposed.
 router.get('/users', async (req, res, next) => {
   try {
-    const users = await User.find({}, { email: 1, role: 1 }).sort({ email: 1 });
+    const users = await User.find({}, { email: 1, role: 1, firstName: 1, lastName: 1 }).sort({ email: 1 });
     return res.status(200).json(
-      users.map((u) => ({ id: u._id, email: u.email, role: u.role }))
+      users.map((u) => ({
+        id: u._id,
+        email: u.email,
+        role: u.role,
+        firstName: u.firstName,
+        lastName: u.lastName,
+      }))
     );
   } catch (err) {
     next(err);
@@ -64,7 +70,7 @@ router.get('/users', async (req, res, next) => {
 // POST /admin/users — create a user, optionally with a role (Req 11.1, 3.3).
 router.post('/users', async (req, res, next) => {
   try {
-    const { email, password, role } = req.body;
+    const { email, password, role, firstName, lastName } = req.body;
     const errors = {};
 
     if (!email || !isValidEmail(email)) errors.email = 'Must be a valid email address';
@@ -87,9 +93,17 @@ router.post('/users', async (req, res, next) => {
       email: email.toLowerCase(),
       passwordHash,
       role: role === 'system_administrator' ? 'system_administrator' : 'user',
+      firstName: (firstName || '').trim(),
+      lastName: (lastName || '').trim(),
     });
 
-    return res.status(201).json({ id: user._id, email: user.email, role: user.role });
+    return res.status(201).json({
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+    });
   } catch (err) {
     next(err);
   }
