@@ -29,7 +29,7 @@ function refreshCookieOptions() {
 // POST /auth/register
 router.post('/register', async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, firstName, lastName } = req.body;
     const errors = {};
 
     if (!email || !isValidEmail(email)) errors.email = 'Must be a valid email address';
@@ -45,7 +45,12 @@ router.post('/register', async (req, res, next) => {
     }
 
     const passwordHash = await authService.hashPassword(password);
-    await User.create({ email: email.toLowerCase(), passwordHash });
+    await User.create({
+      email: email.toLowerCase(),
+      passwordHash,
+      firstName: (firstName || '').trim(),
+      lastName: (lastName || '').trim(),
+    });
 
     return res.status(201).json({ message: 'User created' });
   } catch (err) {
