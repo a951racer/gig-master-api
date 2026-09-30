@@ -42,7 +42,10 @@ const express = require('express');
 const Band = require('../models/Band');
 const User = require('../models/User');
 const JoinRequest = require('../models/JoinRequest');
+const Invite = require('../models/Invite');
 const membershipService = require('../services/membershipService');
+const authService = require('../services/authService');
+const emailService = require('../services/emailService');
 const seedGenres = require('../config/seedGenres');
 const authenticate = require('../middleware/authenticate');
 const bandScope = require('../middleware/bandScope');
@@ -50,6 +53,14 @@ const { requireBandAdmin } = require('../middleware/authorize');
 const { validateFields } = require('../middleware/validate');
 
 const router = express.Router();
+
+// Invites expire seven days after they are created.
+const INVITE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Same permissive email shape used by the auth routes.
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
 // POST /bands — create a band with the current user as its administrator.
 //
@@ -259,6 +270,121 @@ router.patch('/:id/join-requests/:reqId', authenticate, bandScope, requireBandAd
 
     await joinRequest.save();
     return res.status(200).json({ id: joinRequest._id, status: joinRequest.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /bands/:id/invites — invite an email address to the current band.
+//
+// bandScope + requireBandAdmin gate this to the current band's administrator
+// (or a system_administrator override). A raw token is generated and emailed in
+// the accept link; only its hash is stored (mirroring reset/refresh tokens).
+// The partial-unique index on { band, email } filtered to status 'pending'
+// rejects a duplicate simultaneous pending invite (code 11000) -> 409 CONFLICT.
+// The email send is best-effort: a send failure is logged but does NOT fail the
+// request, since the invite has already been created (mirrors forgot-password).
+router.post('/:id/invites', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || !isValidEmail(email)) {
+      validateFields({ email: 'A valid email is required' });
+    }
+
+    const raw = authService.generateRefreshToken();
+    const tokenHash = authService.hashToken(raw);
+
+    let invite;
+    try {
+      invite = await Invite.create({
+        band: req.currentBand,
+        email: email.toLowerCase(),
+        tokenHash,
+        invitedBy: req.user._id,
+        expiresAt: new Date(Date.now() + INVITE_EXPIRY_MS),
+      });
+    } catch (err) {
+      if (err && err.code === 11000) {
+        return res.status(409).json({
+          error: {
+            code: 'CONFLICT',
+            message: 'A pending invite already exists for this email',
+          },
+        });
+      }
+      throw err;
+    }
+
+    // Best-effort invite email. Load the band for its name in the message body.
+    try {
+      const band = await Band.findById(req.currentBand);
+      const bandName = band ? band.name : 'a band';
+      const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+      const acceptLink = `${baseUrl}/invites/accept?token=${raw}`;
+      await emailService.sendMail({
+        to: invite.email,
+        subject: 'GigMaster — Band Invitation',
+        text:
+          `You have been invited to join ${bandName} on GigMaster.\n\n` +
+          `Accept your invitation: ${acceptLink}\n\n` +
+          'This invitation expires in 7 days.',
+        html:
+          `<p>You have been invited to join <strong>${bandName}</strong> on GigMaster.</p>` +
+          `<p><a href="${acceptLink}">Accept your invitation</a></p>` +
+          '<p>This invitation expires in 7 days.</p>',
+      });
+    } catch (emailErr) {
+      console.error('Failed to send band invitation email:', emailErr);
+    }
+
+    return res.status(201).json({ id: invite._id, email: invite.email, status: invite.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /bands/:id/invites — the current band's pending invites.
+//
+// bandScope + requireBandAdmin confine this to an administrator of the current
+// band (or a system_administrator override). Only pending invites are listed.
+router.get('/:id/invites', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
+  try {
+    const invites = await Invite.find({ band: req.currentBand, status: 'pending' });
+    const payload = invites.map((i) => ({
+      id: i._id,
+      email: i.email,
+      status: i.status,
+      expiresAt: i.expiresAt,
+    }));
+    return res.status(200).json(payload);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DELETE /bands/:id/invites/:inviteId — revoke a pending invite.
+//
+// bandScope + requireBandAdmin gate this to the current band's administrator
+// (or a sysadmin override). The invite is looked up scoped to the current band
+// so an invite for another band yields 404. Revoking marks status 'revoked'.
+router.delete('/:id/invites/:inviteId', authenticate, bandScope, requireBandAdmin, async (req, res, next) => {
+  try {
+    const invite = await Invite.findOne({
+      _id: req.params.inviteId,
+      band: req.currentBand,
+    });
+    if (!invite) {
+      const err = new Error('Invite not found');
+      err.status = 404;
+      err.code = 'NOT_FOUND';
+      return next(err);
+    }
+
+    invite.status = 'revoked';
+    await invite.save();
+
+    return res.status(200).json({ id: invite._id, status: invite.status });
   } catch (err) {
     next(err);
   }

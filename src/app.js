@@ -8,6 +8,7 @@ const songsRouter = require('./routes/songs');
 const playlistsRouter = require('./routes/playlists');
 const gigsRouter = require('./routes/gigs');
 const bandsRouter = require('./routes/bands');
+const invitesRouter = require('./routes/invites');
 const adminRouter = require('./routes/admin');
 const errorHandler = require('./middleware/errorHandler');
 
@@ -42,6 +43,7 @@ app.use('/songs', songsRouter);
 app.use('/playlists', playlistsRouter);
 app.use('/gigs', gigsRouter);
 app.use('/bands', bandsRouter);
+app.use('/invites', invitesRouter);
 app.use('/admin', adminRouter);
 
 app.use(errorHandler);
