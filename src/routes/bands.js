@@ -128,9 +128,9 @@ router.patch('/:id', authenticate, bandScope, requireBandAdmin, async (req, res,
 // populated for the band name and project to [{ id, name, isAdmin }].
 router.get('/me/bands', authenticate, async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).populate('bands.band', 'name');
+    const user = await User.findById(req.user._id).populate('bands.band', 'name archivedAt');
     const bands = (user && user.bands ? user.bands : [])
-      .filter((m) => m.band)
+      .filter((m) => m.band && !m.band.archivedAt)
       .map((m) => ({ id: m.band._id, name: m.band.name, isAdmin: m.isAdmin === true }));
 
     return res.status(200).json(bands);
