@@ -132,6 +132,94 @@ router.patch('/users/:id/role', async (req, res, next) => {
   }
 });
 
+// PATCH /admin/users/:id — system-administrator edit of any user (Req 11.1).
+//
+// Accepts any subset of { email, firstName, lastName, role, newPassword }.
+// Sysadmin-gated by the router-level requireSystemAdmin. Because this is an
+// admin action, a password (re)set does NOT require the target's current
+// password. Email uniqueness is enforced (409 EMAIL_TAKEN) and role is
+// validated against ROLES. To avoid locking everyone out, a role change that
+// would leave the system with zero system administrators is rejected
+// (409 LAST_ADMIN) — self-demotion is allowed as long as another sysadmin
+// remains. Complements PATCH /admin/users/:id/role, which is kept for the
+// role-only convenience path.
+router.patch('/users/:id', async (req, res, next) => {
+  try {
+    const { email, firstName, lastName, role, newPassword } = req.body;
+    const errors = {};
+
+    if (email !== undefined && !isValidEmail(email)) {
+      errors.email = 'Must be a valid email address';
+    }
+    if (role !== undefined && !ROLES.includes(role)) {
+      errors.role = `Must be one of: ${ROLES.join(', ')}`;
+    }
+    if (newPassword !== undefined && (!newPassword || newPassword.length < 8)) {
+      errors.newPassword = 'Must be at least 8 characters';
+    }
+    if (Object.keys(errors).length) {
+      validateFields(errors);
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    if (email !== undefined) {
+      const existing = await User.findOne({ email: email.toLowerCase(), _id: { $ne: user._id } });
+      if (existing) {
+        return res.status(409).json({ error: { code: 'EMAIL_TAKEN', message: 'Email already in use' } });
+      }
+      user.email = email.toLowerCase();
+    }
+
+    if (firstName !== undefined) {
+      user.firstName = (firstName || '').trim();
+    }
+    if (lastName !== undefined) {
+      user.lastName = (lastName || '').trim();
+    }
+
+    // Guard against demoting the last remaining system administrator (Req 11.5
+    // safety): if this user is currently a sysadmin and the change would drop
+    // that role, ensure at least one other sysadmin exists first.
+    if (role !== undefined && role !== user.role && user.role === 'system_administrator') {
+      const otherAdmins = await User.countDocuments({
+        role: 'system_administrator',
+        _id: { $ne: user._id },
+      });
+      if (otherAdmins === 0) {
+        return res.status(409).json({
+          error: {
+            code: 'LAST_ADMIN',
+            message: 'Cannot remove the last system administrator',
+          },
+        });
+      }
+    }
+    if (role !== undefined) {
+      user.role = role;
+    }
+
+    if (newPassword !== undefined) {
+      user.passwordHash = await authService.hashPassword(newPassword);
+    }
+
+    await user.save();
+
+    return res.status(200).json({
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /admin/bands — list all bands for admin UIs (e.g. band pickers).
 // Sysadmin-only. Returns { id, name, administrator } sorted by name.
 router.get('/bands', async (req, res, next) => {

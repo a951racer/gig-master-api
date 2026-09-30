@@ -142,14 +142,27 @@ router.post('/logout', async (req, res, next) => {
 
 // GET /auth/me
 router.get('/me', authenticate, (req, res) => {
-  return res.status(200).json({ id: req.user._id, email: req.user.email });
+  return res.status(200).json({
+    id: req.user._id,
+    email: req.user.email,
+    firstName: req.user.firstName,
+    lastName: req.user.lastName,
+  });
 });
 
 // PATCH /auth/me
 router.patch('/me', authenticate, async (req, res, next) => {
   try {
     const user = req.user;
-    const { email, currentPassword, newPassword } = req.body;
+    const { email, currentPassword, newPassword, firstName, lastName } = req.body;
+
+    if (firstName !== undefined) {
+      user.firstName = (firstName || '').trim();
+    }
+
+    if (lastName !== undefined) {
+      user.lastName = (lastName || '').trim();
+    }
 
     if (email !== undefined) {
       if (!isValidEmail(email)) {
@@ -174,7 +187,12 @@ router.patch('/me', authenticate, async (req, res, next) => {
     }
 
     await user.save();
-    return res.status(200).json({ id: user._id, email: user.email });
+    return res.status(200).json({
+      id: user._id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+    });
   } catch (err) {
     next(err);
   }

@@ -314,3 +314,154 @@ describe('Admin routes ALLOW a system_administrator caller (Requirements 11.1–
     expect(seedRes.status).toBe(200);
   });
 });
+
+// PATCH /admin/users/:id — system-administrator edit of any user (#40).
+describe('PATCH /admin/users/:id — admin edit user (#40)', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('editor-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  it('returns 403 FORBIDDEN for a non-sysadmin caller', async () => {
+    const { token: userToken } = await createUserWithToken('plain@example.com', 'user');
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'edit-target@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${userToken}`)
+      .send({ firstName: 'Nope' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('updates email, first/last name, and role and persists them', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'old@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        email: 'New@Example.com',
+        firstName: '  Jane  ',
+        lastName: '  Doe  ',
+        role: 'system_administrator',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBe('new@example.com');
+    expect(res.body.firstName).toBe('Jane');
+    expect(res.body.lastName).toBe('Doe');
+    expect(res.body.role).toBe('system_administrator');
+
+    const persisted = await User.findById(target._id);
+    expect(persisted.email).toBe('new@example.com');
+    expect(persisted.firstName).toBe('Jane');
+    expect(persisted.role).toBe('system_administrator');
+  });
+
+  it('resets a password directly (no current-password) and the new one authenticates', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'reset-me@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'brand-new-pass' });
+
+    expect(res.status).toBe(200);
+
+    const persisted = await User.findById(target._id);
+    const ok = await authService.comparePassword('brand-new-pass', persisted.passwordHash);
+    expect(ok).toBe(true);
+  });
+
+  it('rejects a too-short password with 422', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'short-pass@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ newPassword: 'short' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error.fields.newPassword).toBeTruthy();
+  });
+
+  it('returns 409 EMAIL_TAKEN when the new email belongs to another user', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    await User.create({ email: 'taken@example.com', passwordHash });
+    const target = await User.create({ email: 'mover@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ email: 'taken@example.com' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('EMAIL_TAKEN');
+  });
+
+  it('rejects an invalid role with 422', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'bad-role@example.com', passwordHash });
+
+    const res = await request(app)
+      .patch(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ role: 'wizard' });
+
+    expect(res.status).toBe(422);
+    expect(res.body.error.fields.role).toBeTruthy();
+  });
+
+  it('returns 404 for an unknown user id', async () => {
+    const missingId = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .patch(`/admin/users/${missingId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ firstName: 'Ghost' });
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('blocks demoting the last system administrator with 409 LAST_ADMIN', async () => {
+    // The editor-admin created in beforeEach is the only sysadmin. Demoting
+    // them would leave zero sysadmins.
+    const sole = await User.findOne({ email: 'editor-admin@example.com' });
+
+    const res = await request(app)
+      .patch(`/admin/users/${sole._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ role: 'user' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('LAST_ADMIN');
+
+    const persisted = await User.findById(sole._id);
+    expect(persisted.role).toBe('system_administrator');
+  });
+
+  it('allows demoting a sysadmin when another sysadmin remains', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const second = await User.create({
+      email: 'second-admin@example.com',
+      passwordHash,
+      role: 'system_administrator',
+    });
+
+    const res = await request(app)
+      .patch(`/admin/users/${second._id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ role: 'user' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.role).toBe('user');
+  });
+});

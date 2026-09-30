@@ -161,3 +161,76 @@ describe('authenticate middleware — still loads req.user (Requirement 20.3)', 
     expect(res.status).toBe(401);
   });
 });
+
+// Self-service profile editing (#39): PATCH /auth/me handles first/last name
+// alongside the existing email/password handling; GET /auth/me returns names.
+describe('Self-service profile editing (#39)', () => {
+  beforeEach(async () => {
+    await registerUser();
+  });
+
+  async function login() {
+    const res = await loginUser();
+    return res.body.accessToken;
+  }
+
+  it('PATCH /auth/me updates first/last name (trimmed) and returns them', async () => {
+    const token = await login();
+
+    const res = await request(app)
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ firstName: '  Ada  ', lastName: '  Lovelace  ' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.firstName).toBe('Ada');
+    expect(res.body.lastName).toBe('Lovelace');
+
+    const persisted = await User.findOne({ email: EMAIL });
+    expect(persisted.firstName).toBe('Ada');
+    expect(persisted.lastName).toBe('Lovelace');
+  });
+
+  it('GET /auth/me returns first/last name and email', async () => {
+    const token = await login();
+    await request(app)
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ firstName: 'Grace', lastName: 'Hopper' });
+
+    const res = await request(app)
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBe(EMAIL);
+    expect(res.body.firstName).toBe('Grace');
+    expect(res.body.lastName).toBe('Hopper');
+  });
+
+  it('still enforces email uniqueness (409 EMAIL_TAKEN)', async () => {
+    // A second user occupies the target email.
+    await request(app).post('/auth/register').send({ email: 'taken2@example.com', password: PASSWORD });
+    const token = await login();
+
+    const res = await request(app)
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ email: 'taken2@example.com' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('EMAIL_TAKEN');
+  });
+
+  it('still requires the correct current password to change password', async () => {
+    const token = await login();
+
+    const res = await request(app)
+      .patch('/auth/me')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ currentPassword: 'wrong-password', newPassword: 'a-new-password' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.error.code).toBe('INVALID_CREDENTIALS');
+  });
+});
