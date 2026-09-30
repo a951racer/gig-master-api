@@ -1,5 +1,5 @@
 const express = require('express');
-const nodemailer = require('nodemailer');
+const emailService = require('../services/emailService');
 const User = require('../models/User');
 const RefreshToken = require('../models/RefreshToken');
 const authService = require('../services/authService');
@@ -209,19 +209,9 @@ router.post('/forgot-password', async (req, res, next) => {
       await user.save();
 
       try {
-        const transporter = nodemailer.createTransport({
-          host: process.env.SMTP_HOST,
-          port: parseInt(process.env.SMTP_PORT || '587', 10),
-          auth: {
-            user: process.env.SMTP_USER,
-            pass: process.env.SMTP_PASS,
-          },
-        });
-
         const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${resetToken}`;
 
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || 'noreply@gigmaster.app',
+        await emailService.sendMail({
           to: user.email,
           subject: 'GigMaster — Password Reset',
           text: `Reset your password: ${resetUrl}\n\nThis link expires in 60 minutes.`,
