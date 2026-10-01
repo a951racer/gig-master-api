@@ -20,10 +20,15 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// POST /playlists — create
+// POST /playlists — create. Optionally accepts `songs` (an ordered array of
+// song ids) so a playlist can be created pre-populated — e.g. copying an
+// existing playlist in one atomic request. Each song id is validated to belong
+// to the current band; duplicates are removed while order is preserved. Unknown
+// or out-of-band ids are rejected (422) so a copy can't smuggle in other bands'
+// songs.
 router.post('/', async (req, res, next) => {
   try {
-    const { name, description } = req.body;
+    const { name, description, songs } = req.body;
 
     if (!name) {
       const err = new Error('name is required');
@@ -33,7 +38,48 @@ router.post('/', async (req, res, next) => {
       return next(err);
     }
 
-    const playlist = new Playlist({ band: req.currentBand, name, description });
+    let songIds = [];
+    if (songs !== undefined) {
+      if (!Array.isArray(songs)) {
+        const err = new Error('songs must be an array of song ids');
+        err.status = 422;
+        err.code = 'VALIDATION_ERROR';
+        err.fields = { songs: 'must be an array' };
+        return next(err);
+      }
+
+      // Dedupe while preserving the first-seen order.
+      const seen = new Set();
+      const ordered = [];
+      for (const id of songs) {
+        const key = String(id);
+        if (!seen.has(key)) {
+          seen.add(key);
+          ordered.push(id);
+        }
+      }
+
+      if (ordered.length > 0) {
+        // Every song must belong to the current band.
+        const found = await Song.find(
+          { _id: { $in: ordered }, band: req.currentBand },
+          { _id: 1 }
+        );
+        const foundSet = new Set(found.map((d) => d._id.toString()));
+        const invalid = ordered.filter((id) => !foundSet.has(String(id)));
+        if (invalid.length > 0) {
+          const err = new Error('One or more songs do not belong to the current band');
+          err.status = 422;
+          err.code = 'VALIDATION_ERROR';
+          err.fields = { songs: 'contains unknown or out-of-band song ids' };
+          return next(err);
+        }
+      }
+
+      songIds = ordered;
+    }
+
+    const playlist = new Playlist({ band: req.currentBand, name, description, songs: songIds });
     await playlist.save();
     res.status(201).json(playlist);
   } catch (err) {
