@@ -10,6 +10,7 @@ const Playlist = require('../models/Playlist');
 const Gig = require('../models/Gig');
 const JoinRequest = require('../models/JoinRequest');
 const Invite = require('../models/Invite');
+const SeedGenreList = require('../models/SeedGenreList');
 const authService = require('../services/authService');
 const seedGenres = require('../config/seedGenres');
 
@@ -68,6 +69,7 @@ afterEach(async () => {
     Gig.deleteMany({}),
     JoinRequest.deleteMany({}),
     Invite.deleteMany({}),
+    SeedGenreList.deleteMany({}),
   ]);
 });
 
@@ -291,8 +293,7 @@ describe('Admin routes ALLOW a system_administrator caller (Requirements 11.1–
     expect(put.status).toBe(200);
     expect(put.body.genres).toEqual(newList);
 
-    // GET again — the in-memory module-level list reflects the change within
-    // this process.
+    // GET again — reads back the persisted list.
     const after = await request(app)
       .get('/admin/seed-genres')
       .set('Authorization', `Bearer ${adminToken}`);
@@ -703,3 +704,76 @@ describe('Two-stage band deletion (#42)', () => {
     expect(notFound.status).toBe(404);
   });
 });
+
+// Persisted master Seed_Genre_List (#41): durability + new-band seeding source.
+describe('Persisted Seed_Genre_List (#41)', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('seed-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  it('GET lazily initializes the persisted list from DEFAULT_GENRES', async () => {
+    // No SeedGenreList document exists yet (cleaned between tests).
+    const res = await request(app)
+      .get('/admin/seed-genres')
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.genres).toEqual(seedGenres.DEFAULT_GENRES);
+
+    // The singleton was created and persisted.
+    const doc = await SeedGenreList.findOne({ key: 'master' });
+    expect(doc).not.toBeNull();
+    expect(doc.genres).toEqual(seedGenres.DEFAULT_GENRES);
+  });
+
+  it('PUT persists the list to the database (survives a fresh model read)', async () => {
+    const newList = ['Ska', 'Grunge', 'Ambient'];
+    const put = await request(app)
+      .put('/admin/seed-genres')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ genres: newList });
+    expect(put.status).toBe(200);
+    expect(put.body.genres).toEqual(newList);
+
+    // Read straight from the DB (not the API) to prove durability — this is the
+    // persistence the in-memory version lacked.
+    const doc = await SeedGenreList.findOne({ key: 'master' });
+    expect(doc.genres).toEqual(newList);
+
+    // And there is exactly one singleton document (no duplicates on replace).
+    expect(await SeedGenreList.countDocuments()).toBe(1);
+  });
+
+  it('new bands are seeded from the PERSISTED list, not the hardcoded defaults', async () => {
+    // Maintain a custom seed list.
+    const customList = ['Surf', 'Shoegaze'];
+    await request(app)
+      .put('/admin/seed-genres')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ genres: customList });
+
+    // Create a band and verify its genres came from the persisted list.
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const owner = await User.create({ email: 'seed-owner@example.com', passwordHash });
+    const createRes = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Seeded From Custom', administrator: owner._id.toString() });
+    expect(createRes.status).toBe(201);
+
+    const genres = await Genre.find({ band: createRes.body.id });
+    expect(genres.map((g) => g.name).sort()).toEqual([...customList].sort());
+  });
+
+  it('seedBandGenres reads the persisted list directly (service-level)', async () => {
+    await seedGenres.setSeedGenreList(['Only One']);
+    const bandId = new mongoose.Types.ObjectId();
+    await seedGenres.seedBandGenres(bandId);
+
+    const genres = await Genre.find({ band: bandId });
+    expect(genres.map((g) => g.name)).toEqual(['Only One']);
+  });
+})
