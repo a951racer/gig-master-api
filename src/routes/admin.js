@@ -331,6 +331,45 @@ router.post('/bands/:id/members', async (req, res, next) => {
   }
 });
 
+// DELETE /admin/bands/:id/members/:userId — remove a member from a band (#48).
+//
+// Sysadmin-gated and band-independent (no X-Band-Id). Removes the user's
+// bands[] entry for this band via membershipService.removeMember. Guard rails:
+//   - 404 if the band or user does not exist.
+//   - 409 ADMIN_REMOVAL if the user is the band's current administrator —
+//     a band must never be left admin-less, so the admin must be reassigned
+//     (PATCH /admin/bands/:id/administrator) before removal.
+router.delete('/bands/:id/members/:userId', async (req, res, next) => {
+  try {
+    const band = await Band.findById(req.params.id);
+    if (!band) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Band not found' } });
+    }
+
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    // Never leave a band without an administrator: block removing the current
+    // admin. The caller must reassign the administrator first.
+    if (band.administrator && String(band.administrator) === String(user._id)) {
+      return res.status(409).json({
+        error: {
+          code: 'ADMIN_REMOVAL',
+          message: 'Cannot remove the band administrator; reassign the administrator first',
+        },
+      });
+    }
+
+    await membershipService.removeMember(band._id, user._id);
+
+    return res.status(200).json({ message: 'Member removed' });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH /admin/bands/:id/administrator — designate/reassign the administrator (Req 11.3).
 router.patch('/bands/:id/administrator', async (req, res, next) => {
   try {
