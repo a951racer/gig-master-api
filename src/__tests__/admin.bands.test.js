@@ -777,3 +777,88 @@ describe('Persisted Seed_Genre_List (#41)', () => {
     expect(genres.map((g) => g.name)).toEqual(['Only One']);
   });
 })
+
+// DELETE /admin/bands/:id/members/:userId — remove a member (#48).
+describe('DELETE /admin/bands/:id/members/:userId (#48)', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('rm-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  // Create a band owned by `owner`, add `member` as a plain member, return ids.
+  async function bandWithMember() {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const owner = await User.create({ email: `owner-${Date.now()}@ex.com`, passwordHash });
+    const member = await User.create({ email: `member-${Date.now()}@ex.com`, passwordHash });
+
+    const createRes = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Remove Test', administrator: owner._id.toString() });
+    const bandId = createRes.body.id;
+
+    await request(app)
+      .post(`/admin/bands/${bandId}/members`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ userId: member._id.toString() });
+
+    return { bandId, ownerId: owner._id.toString(), memberId: member._id.toString() };
+  }
+
+  it('removes a non-admin member; their membership entry is gone', async () => {
+    const { bandId, memberId } = await bandWithMember();
+
+    const res = await request(app)
+      .delete(`/admin/bands/${bandId}/members/${memberId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+
+    const member = await User.findById(memberId);
+    expect(member.bands.find((m) => m.band.toString() === bandId)).toBeUndefined();
+  });
+
+  it('blocks removing the band administrator with 409 ADMIN_REMOVAL', async () => {
+    const { bandId, ownerId } = await bandWithMember();
+
+    const res = await request(app)
+      .delete(`/admin/bands/${bandId}/members/${ownerId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('ADMIN_REMOVAL');
+
+    // The admin's membership is untouched.
+    const owner = await User.findById(ownerId);
+    expect(owner.bands.find((m) => m.band.toString() === bandId)).toBeDefined();
+  });
+
+  it('returns 403 for a non-sysadmin caller', async () => {
+    const { token: userToken } = await createUserWithToken('rm-nope@example.com', 'user');
+    const { bandId, memberId } = await bandWithMember();
+
+    const res = await request(app)
+      .delete(`/admin/bands/${bandId}/members/${memberId}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('returns 404 for an unknown band or user', async () => {
+    const { bandId, memberId } = await bandWithMember();
+    const missing = new mongoose.Types.ObjectId().toString();
+
+    const badBand = await request(app)
+      .delete(`/admin/bands/${missing}/members/${memberId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(badBand.status).toBe(404);
+
+    const badUser = await request(app)
+      .delete(`/admin/bands/${bandId}/members/${missing}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(badUser.status).toBe(404);
+  });
+});
