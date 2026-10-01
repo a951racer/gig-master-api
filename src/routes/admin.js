@@ -10,17 +10,14 @@
 // Error responses follow the project convention `{ error: { code, message } }`
 // with 422 carrying `error.fields` (see middleware/errorHandler + validate).
 //
-// Seed genre list store (Req 11.4 / 10.4): the master `Seed_Genre_List` is
-// currently a hardcoded `DEFAULT_GENRES` array in `config/seedGenres.js`. A
-// persistent store is out of scope for this task, so this router keeps a
-// pragmatic module-level (in-memory) copy of the list, initialized from
-// `seedGenres.DEFAULT_GENRES`. `GET /admin/seed-genres` returns the current
-// maintained list and `PUT /admin/seed-genres` validates and replaces it. The
-// list is used to seed NEW bands; because `seedBandGenres` reads from the
-// config array, edits made here affect this router's view of the list rather
-// than retroactively rewriting existing bands, which matches Req 10.4 (seed
-// edits are not retroactive). This is intentionally simple — persisting the
-// list (e.g. a SeedGenre collection) is deferred.
+// Seed genre list store (Req 11.4 / 10.4, #41): the master `Seed_Genre_List` is
+// persisted as a singleton document (model `SeedGenreList`), accessed via
+// `seedGenres.getSeedGenreList()` / `setSeedGenreList()`. It is lazily
+// initialized from `DEFAULT_GENRES` on first read. `GET /admin/seed-genres`
+// returns the persisted list and `PUT /admin/seed-genres` replaces it durably
+// (survives restarts, shared across instances). The list is the source of truth
+// for seeding NEW bands via `seedBandGenres`; existing bands are not rewritten
+// (non-retroactive, per Req 10.4).
 
 const express = require('express');
 
@@ -43,8 +40,6 @@ const router = express.Router();
 
 const ROLES = ['user', 'system_administrator'];
 
-// In-memory maintained copy of the master Seed_Genre_List (see header note).
-let seedGenreList = [...seedGenres.DEFAULT_GENRES];
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -494,13 +489,22 @@ router.delete('/bands/:id', async (req, res, next) => {
   }
 });
 
-// GET /admin/seed-genres — return the current master Seed_Genre_List (Req 11.4, 10.4).
-router.get('/seed-genres', (req, res) => {
-  return res.status(200).json({ genres: [...seedGenreList] });
+// GET /admin/seed-genres — return the persisted master Seed_Genre_List (#41,
+// Req 11.4, 10.4). Lazily initialized from DEFAULT_GENRES on first read.
+router.get('/seed-genres', async (req, res, next) => {
+  try {
+    const genres = await seedGenres.getSeedGenreList();
+    return res.status(200).json({ genres });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// PUT /admin/seed-genres — replace the maintained Seed_Genre_List (Req 11.4, 10.4).
-router.put('/seed-genres', (req, res, next) => {
+// PUT /admin/seed-genres — replace the persisted Seed_Genre_List (#41, Req 11.4,
+// 10.4). Edits are durable (survive restarts, shared across instances) and are
+// the source of truth for seeding NEW bands; existing bands are unaffected
+// (non-retroactive, per the original design).
+router.put('/seed-genres', async (req, res, next) => {
   try {
     const { genres } = req.body;
 
@@ -516,9 +520,9 @@ router.put('/seed-genres', (req, res, next) => {
       validateFields({ genres: 'Every genre must be a non-empty string' });
     }
 
-    seedGenreList = cleaned;
+    const stored = await seedGenres.setSeedGenreList(cleaned);
 
-    return res.status(200).json({ genres: [...seedGenreList] });
+    return res.status(200).json({ genres: stored });
   } catch (err) {
     next(err);
   }
