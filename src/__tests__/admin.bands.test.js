@@ -862,3 +862,75 @@ describe('DELETE /admin/bands/:id/members/:userId (#48)', () => {
     expect(badUser.status).toBe(404);
   });
 });
+
+// GET /admin/users/:id — single user + band memberships (#55 support).
+describe('GET /admin/users/:id', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('getuser-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  it('returns 403 for a non-sysadmin caller', async () => {
+    const { token: userToken } = await createUserWithToken('getuser-nope@example.com', 'user');
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({ email: 'target-get@example.com', passwordHash });
+
+    const res = await request(app)
+      .get(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${userToken}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+  });
+
+  it('returns 404 for an unknown user', async () => {
+    const missing = new mongoose.Types.ObjectId().toString();
+    const res = await request(app)
+      .get(`/admin/users/${missing}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('returns the user with band memberships and admin indicators', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const target = await User.create({
+      email: 'detail@example.com',
+      passwordHash,
+      firstName: 'De',
+      lastName: 'Tail',
+    });
+
+    // Band A: target is the administrator. Band B: target is a plain member.
+    const bandA = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Admin Of This', administrator: target._id.toString() });
+    expect(bandA.status).toBe(201);
+
+    const otherOwnerHash = await authService.hashPassword(PASSWORD);
+    const otherOwner = await User.create({ email: 'other-owner@example.com', passwordHash: otherOwnerHash });
+    const bandB = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Member Of This', administrator: otherOwner._id.toString() });
+    await request(app)
+      .post(`/admin/bands/${bandB.body.id}/members`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ userId: target._id.toString() });
+
+    const res = await request(app)
+      .get(`/admin/users/${target._id}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.email).toBe('detail@example.com');
+    expect(res.body.firstName).toBe('De');
+
+    const byName = Object.fromEntries(res.body.bands.map((b) => [b.name, b]));
+    expect(byName['Admin Of This'].isAdmin).toBe(true);
+    expect(byName['Member Of This'].isAdmin).toBe(false);
+  });
+});

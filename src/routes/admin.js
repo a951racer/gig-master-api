@@ -68,6 +68,46 @@ router.get('/users', async (req, res, next) => {
   }
 });
 
+// GET /admin/users/:id — a single user plus their band memberships, for the
+// admin user-detail page (#55). Populates bands.band with the band name so each
+// membership carries { id, name, isAdmin } (the isAdmin flag is the per-band
+// administrator designator). Sysadmin-gated (router-level). 404 if not found.
+router.get('/users/:id', async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id, {
+      email: 1,
+      role: 1,
+      firstName: 1,
+      lastName: 1,
+      bands: 1,
+    }).populate('bands.band', 'name archivedAt');
+
+    if (!user) {
+      return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'User not found' } });
+    }
+
+    const bands = (user.bands || [])
+      .filter((m) => m.band)
+      .map((m) => ({
+        id: m.band._id,
+        name: m.band.name,
+        isAdmin: m.isAdmin === true,
+        archived: !!m.band.archivedAt,
+      }));
+
+    return res.status(200).json({
+      id: user._id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      bands,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // POST /admin/users — create a user, optionally with a role (Req 11.1, 3.3).
 router.post('/users', async (req, res, next) => {
   try {
