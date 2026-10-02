@@ -361,7 +361,7 @@ function drawHeader(doc, representation, pageIndex, geom) {
     // chordColor. save()/restore() scopes the fillOpacity so later draws are
     // fully opaque again.
     doc.save();
-    doc.fillOpacity(0.3);
+    doc.fillOpacity(0.25);
     doc.rect(MARGIN, bannerTop, usableWidth, bannerH).fill(chordColor);
     doc.restore();
     doc.fillColor('black').font('Helvetica-Bold').fontSize(18)
