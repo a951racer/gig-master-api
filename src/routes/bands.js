@@ -51,6 +51,7 @@ const authenticate = require('../middleware/authenticate');
 const bandScope = require('../middleware/bandScope');
 const { requireBandAdmin } = require('../middleware/authorize');
 const { validateFields } = require('../middleware/validate');
+const { isDuplicateBandNameError, duplicateBandNameError } = require('../utils/bandName');
 
 const router = express.Router();
 
@@ -79,7 +80,13 @@ router.post('/', authenticate, async (req, res, next) => {
     // Band.administrator is required at creation; create it pointing at the
     // creator, then run setAdministrator to establish the single-admin
     // membership invariant (adds the membership with isAdmin: true) — Req 1.6.
-    const band = await Band.create({ name: name.trim(), administrator: req.user._id });
+    let band;
+    try {
+      band = await Band.create({ name: name.trim(), administrator: req.user._id });
+    } catch (err) {
+      if (isDuplicateBandNameError(err)) return next(duplicateBandNameError());
+      throw err;
+    }
     await membershipService.setAdministrator(band._id, req.user._id);
     await seedGenres.seedBandGenres(band._id);
 
@@ -113,7 +120,12 @@ router.patch('/:id', authenticate, bandScope, requireBandAdmin, async (req, res,
     }
 
     band.name = name.trim();
-    await band.save();
+    try {
+      await band.save();
+    } catch (err) {
+      if (isDuplicateBandNameError(err)) return next(duplicateBandNameError());
+      throw err;
+    }
 
     return res.status(200).json({ id: band._id, name: band.name });
   } catch (err) {

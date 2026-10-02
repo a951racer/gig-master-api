@@ -195,3 +195,75 @@ describe('Band creation — Property 4 (Requirement 1.6)', () => {
     expect(await Band.countDocuments()).toBe(before);
   });
 });
+
+// Global unique band name guard (case-insensitive across the whole app).
+describe('Band name uniqueness (global, case-insensitive)', () => {
+  async function tokenForNewUser() {
+    const user = await createUser();
+    const populated = await User.findById(user._id).populate('bands.band', 'name');
+    return { user, token: authService.generateAccessToken(populated) };
+  }
+
+  it('POST /bands rejects a duplicate name with 409 DUPLICATE_BAND_NAME', async () => {
+    const { token } = await tokenForNewUser();
+
+    const first = await request(app)
+      .post('/bands')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ name: 'The Owls' });
+    expect(first.status).toBe(201);
+
+    // A different user tries to create a band with the same name.
+    const { token: token2 } = await tokenForNewUser();
+    const dup = await request(app)
+      .post('/bands')
+      .set('Authorization', `Bearer ${token2}`)
+      .send({ name: 'The Owls' });
+
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe('DUPLICATE_BAND_NAME');
+    expect(await Band.countDocuments()).toBe(1);
+  });
+
+  it('is case-insensitive ("The Owls" vs "the owls")', async () => {
+    const { token } = await tokenForNewUser();
+    await request(app).post('/bands').set('Authorization', `Bearer ${token}`).send({ name: 'The Owls' });
+
+    const { token: token2 } = await tokenForNewUser();
+    const dup = await request(app)
+      .post('/bands')
+      .set('Authorization', `Bearer ${token2}`)
+      .send({ name: 'the owls' });
+
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe('DUPLICATE_BAND_NAME');
+  });
+
+  it('PATCH /bands/:id rejects renaming to an existing band name (409)', async () => {
+    // User A creates "Alpha".
+    const { token: tokenA } = await tokenForNewUser();
+    await request(app).post('/bands').set('Authorization', `Bearer ${tokenA}`).send({ name: 'Alpha' });
+
+    // User B creates "Beta", then re-mints a token carrying the Beta membership
+    // (so bandScope + requireBandAdmin pass) and tries to rename Beta -> Alpha.
+    const { user: userB } = await tokenForNewUser();
+    const betaRes = await (async () => {
+      const populated = await User.findById(userB._id).populate('bands.band', 'name');
+      const token = authService.generateAccessToken(populated);
+      return request(app).post('/bands').set('Authorization', `Bearer ${token}`).send({ name: 'Beta' });
+    })();
+    const betaId = betaRes.body.id;
+
+    const populatedB = await User.findById(userB._id).populate('bands.band', 'name');
+    const tokenB = authService.generateAccessToken(populatedB);
+
+    const rename = await request(app)
+      .patch(`/bands/${betaId}`)
+      .set('Authorization', `Bearer ${tokenB}`)
+      .set('X-Band-Id', betaId)
+      .send({ name: 'Alpha' });
+
+    expect(rename.status).toBe(409);
+    expect(rename.body.error.code).toBe('DUPLICATE_BAND_NAME');
+  });
+});

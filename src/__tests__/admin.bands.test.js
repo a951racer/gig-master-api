@@ -934,3 +934,48 @@ describe('GET /admin/users/:id', () => {
     expect(byName['Member Of This'].isAdmin).toBe(false);
   });
 });
+
+// Global unique band name guard on the sysadmin create/rename paths (#band-unique).
+describe('Admin band-name uniqueness (global)', () => {
+  let adminToken;
+
+  beforeEach(async () => {
+    const { token } = await createUserWithToken('banduniq-admin@example.com', 'system_administrator');
+    adminToken = token;
+  });
+
+  it('POST /admin/bands rejects a duplicate band name with 409 DUPLICATE_BAND_NAME', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const owner = await User.create({ email: 'bu-owner@example.com', passwordHash });
+
+    const first = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'Unique Band', administrator: owner._id.toString() });
+    expect(first.status).toBe(201);
+
+    const dup = await request(app)
+      .post('/admin/bands')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'unique band', administrator: owner._id.toString() });
+
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe('DUPLICATE_BAND_NAME');
+  });
+
+  it('PATCH /admin/bands/:id rejects renaming to an existing band name (409)', async () => {
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const owner = await User.create({ email: 'bu-owner2@example.com', passwordHash });
+
+    const a = await request(app).post('/admin/bands').set('Authorization', `Bearer ${adminToken}`).send({ name: 'AA Band', administrator: owner._id.toString() });
+    const b = await request(app).post('/admin/bands').set('Authorization', `Bearer ${adminToken}`).send({ name: 'BB Band', administrator: owner._id.toString() });
+
+    const rename = await request(app)
+      .patch(`/admin/bands/${b.body.id}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ name: 'AA Band' });
+
+    expect(rename.status).toBe(409);
+    expect(rename.body.error.code).toBe('DUPLICATE_BAND_NAME');
+  });
+});
