@@ -6,6 +6,7 @@ const authenticate = require('../middleware/authenticate');
 const bandScope = require('../middleware/bandScope');
 const { numbersToNames, renderModel } = require('../services/chartTranspose');
 const { isSupportedKey } = require('../services/chartSpelling');
+const { paginate } = require('../services/chartLayout');
 
 const router = express.Router();
 
@@ -208,12 +209,15 @@ router.get('/:id/charts', async (req, res, next) => {
         const rendered = isNumbers
           ? renderModel(chartDoc.body)
           : renderModel(numbersToNames(chartDoc.body, requested));
+        const { pages } = paginate(rendered, { formatting: chartDoc.formatting });
         chart = {
-          title: chartDoc.title,
-          artistLabel: chartDoc.artistLabel,
+          // Title/artist are song properties, not chart-overridable.
+          title: song ? song.title : '',
+          artist: song ? song.artist : '',
           keyLabel,
           formatting: chartDoc.formatting,
           sections: rendered.sections,
+          pages,
         };
       }
 

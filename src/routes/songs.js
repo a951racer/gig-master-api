@@ -9,6 +9,7 @@ const bandScope = require('../middleware/bandScope');
 const { namesToNumbers, numbersToNames, renderModel } = require('../services/chartTranspose');
 const { validateChartBody } = require('../services/chartGrammar');
 const { isSupportedKey } = require('../services/chartSpelling');
+const { paginate } = require('../services/chartLayout');
 
 const router = express.Router();
 
@@ -196,17 +197,58 @@ async function loadScopedSong(req, next) {
 }
 
 // Serialize a Chart document to the stored-chart response shape: the canonical
-// numbers `body` plus its metadata.
+// numbers `body` plus its presentation formatting. Title/artist are NOT part
+// of the chart — they belong to the Song and are added by the render paths.
 function serializeChart(chart) {
   return {
     song: chart.song,
     body: chart.body,
-    title: chart.title,
-    artistLabel: chart.artistLabel,
     formatting: chart.formatting,
     createdAt: chart.createdAt,
     updatedAt: chart.updatedAt,
   };
+}
+
+// Build the full Render_Representation for a chart body in a chosen key,
+// deriving the display title/artist from the SONG (R: title/artist are song
+// properties, not chart-overridable). Returns both the flat `sections` (for
+// simple consumers / back-compat) and the paginated `pages` (virtual
+// 8.5x11 layout honoring formatting.columns + COLUMN_BREAK/PAGE_BREAK), so the
+// web viewer and PDF render identical breaks.
+function buildRepresentation(song, chart, numbersOrNamesBody, keyLabel) {
+  const rendered = renderModel(numbersOrNamesBody);
+  const formatting = chart.formatting;
+  const { pages } = paginate(rendered, { formatting });
+  return {
+    title: song.title,
+    artist: song.artist,
+    keyLabel,
+    formatting,
+    sections: rendered.sections,
+    pages,
+  };
+}
+
+// Resolve the `key` query param to a { body, keyLabel } pair, or signal a
+// 422 KEY_INVALID via next(err) and return null. '' / 'Numbers' => stored
+// numbers; a supported major key => numbers->names in that key.
+function resolveKeyedBody(chart, req, next, field = 'key') {
+  const requested = typeof req.query.key === 'string' ? req.query.key.trim() : '';
+  const isNumbers = requested === '' || requested === 'Numbers';
+  if (isNumbers) {
+    return { body: chart.body, keyLabel: 'Numbers' };
+  }
+  if (!isSupportedKey(requested)) {
+    const err = new Error(
+      `Unsupported or invalid key "${requested}". Supply a supported major key or "Numbers".`
+    );
+    err.status = 422;
+    err.code = 'KEY_INVALID';
+    err.fields = { [field]: 'unsupported or invalid key' };
+    next(err);
+    return null;
+  }
+  return { body: numbersToNames(chart.body, requested), keyLabel: requested };
 }
 
 // GET /songs/:id/chart — stored canonical chart, or 404 CHART_NOT_FOUND.
@@ -223,16 +265,19 @@ router.get('/:id/chart', async (req, res, next) => {
       return next(err);
     }
 
-    res.json(serializeChart(chart));
+    // Include the song-derived title/artist so the editor can display them
+    // (read-only) without a second request.
+    res.json({ ...serializeChart(chart), title: song.title, artist: song.artist });
   } catch (err) {
     next(err);
   }
 });
 
 // GET /songs/:id/chart/view — render the chart in a chosen representation.
-// Query `key`: omitted or 'Numbers' renders the stored numbers body as-is;
-// a key value transposes numbers -> names in that key. Returns the
-// Render_Representation (title/artistLabel/keyLabel/formatting/sections).
+// Query `key`: omitted or 'Numbers' renders the stored numbers body as-is; a
+// key value transposes numbers -> names in that key. Returns the
+// Render_Representation (title/artist from the SONG, keyLabel, formatting,
+// flat `sections`, and paginated `pages`).
 router.get('/:id/chart/view', async (req, res, next) => {
   try {
     const song = await loadScopedSong(req, next);
@@ -246,76 +291,40 @@ router.get('/:id/chart/view', async (req, res, next) => {
       return next(err);
     }
 
-    // Resolve the requested display representation. A missing/blank `key`, or
-    // the literal 'Numbers', renders the stored numbers body directly; any
-    // other value is a target key and must be a supported major key.
-    const requested = typeof req.query.key === 'string' ? req.query.key.trim() : '';
-    const isNumbers = requested === '' || requested === 'Numbers';
+    const keyed = resolveKeyedBody(chart, req, next);
+    if (!keyed) return;
 
-    let rendered;
-    let keyLabel;
-    if (isNumbers) {
-      rendered = renderModel(chart.body);
-      keyLabel = 'Numbers';
-    } else {
-      if (!isSupportedKey(requested)) {
-        const err = new Error(
-          `Unsupported or invalid key "${requested}". Supply a supported major key or "Numbers".`
-        );
-        err.status = 422;
-        err.code = 'KEY_INVALID';
-        err.fields = { key: 'unsupported or invalid key' };
-        return next(err);
-      }
-      rendered = renderModel(numbersToNames(chart.body, requested));
-      keyLabel = requested;
-    }
-
-    // Wrap the rendered { sections } with the metadata the viewer needs,
-    // matching the Render_Representation shape in design.md.
-    res.json({
-      title: chart.title,
-      artistLabel: chart.artistLabel,
-      keyLabel,
-      formatting: chart.formatting,
-      sections: rendered.sections,
-    });
+    res.json(buildRepresentation(song, chart, keyed.body, keyed.keyLabel));
   } catch (err) {
     next(err);
   }
 });
 
 /* ------------------------------------------------------------------------- *
- * PDF generation (task 5.1, R9)
+ * PDF generation (R9)
  *
- * GET /songs/:id/chart/pdf?key=<Numbers|KEY> builds the SAME
- * Render_Representation as GET /:id/chart/view (reusing renderModel /
- * numbersToNames) and lays it out as a PDF with pdfkit (pure-JS, Heroku
- * friendly). Chord tokens are drawn ABOVE the lyric syllable they attach to in
- * a monospaced font; `formatting.columns` (1 or 2) and `formatting.chordColor`
- * are honored; `PAGE_BREAK`/`COLUMN_BREAK` directive lines force a new
- * page/column; a `TRANSPOSE_KEY` directive renders as a small "Transpose +n"
- * marker. Long content flows onto additional pages. The result streams back as
- * `application/pdf` with a sanitized attachment filename from the song title.
+ * GET /songs/:id/chart/pdf?key=<Numbers|KEY> consumes the SAME paginated
+ * layout as GET /:id/chart/view (via chartLayout.paginate) and draws it with
+ * pdfkit on US-Letter pages so the PDF matches the web viewer page-for-page.
+ * Chord tokens are drawn ABOVE the lyric syllable they attach to in a
+ * monospaced font; `formatting.columns` and `formatting.chordColor` are
+ * honored; COLUMN_BREAK/PAGE_BREAK are already resolved by the paginator (they
+ * never appear as drawable lines). A TRANSPOSE_KEY line renders as a small
+ * marker. Title/artist come from the SONG. Streams `application/pdf`.
  * ------------------------------------------------------------------------- */
 
 // Map a stored formatting.chordColor to something pdfkit's fillColor accepts.
-// Named CSS colors and #rrggbb both work; fall back to blue on anything odd.
 function resolveChordColor(chordColor) {
   if (typeof chordColor !== 'string' || chordColor.trim() === '') return 'blue';
   const c = chordColor.trim();
-  // Allow a bare hex (#abc / #aabbcc) or a simple color word.
   if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c)) return c;
   if (/^[a-zA-Z]+$/.test(c)) return c;
   return 'blue';
 }
 
-// Turn a song title into a safe, non-empty PDF filename (no path separators,
-// control chars, or characters that break Content-Disposition).
+// Turn a title into a safe, non-empty PDF filename.
 function sanitizePdfFilename(title) {
   const base = (typeof title === 'string' ? title : '').trim() || 'chart';
-  // Replace anything that isn't a safe filename char with an underscore and
-  // collapse runs; strip leading/trailing dots and underscores.
   const cleaned = base
     .replace(/[^A-Za-z0-9 ._-]+/g, '_')
     .replace(/\s+/g, ' ')
@@ -325,189 +334,112 @@ function sanitizePdfFilename(title) {
   return (cleaned || 'chart') + '.pdf';
 }
 
-// Lay a Render_Representation out onto a pdfkit document. Pure drawing: no I/O.
-// The doc is assumed already created; the caller owns piping/ending it.
-function layoutChartPdf(doc, rendered) {
+// Draw a page header. Page 1 gets the tall banner (title [key] + artist on a
+// shaded block); later pages get a condensed single-line "title [key]".
+function drawHeader(doc, representation, pageIndex, geom) {
+  const { MARGIN, usableWidth, chordColor } = geom;
+  const keyPart = representation.keyLabel && representation.keyLabel !== 'Numbers'
+    ? ` [${representation.keyLabel}]`
+    : representation.keyLabel === 'Numbers' ? ' [Numbers]' : '';
+  const titleText = `${representation.title || 'Untitled'}${keyPart}`;
+  if (pageIndex === 0) {
+    const bannerTop = MARGIN;
+    const bannerH = 56;
+    doc.save();
+    doc.rect(MARGIN, bannerTop, usableWidth, bannerH).fill('#e5e5e5');
+    doc.restore();
+    doc.fillColor('black').font('Helvetica-Bold').fontSize(18)
+      .text(titleText, MARGIN + 12, bannerTop + 8, { width: usableWidth - 24, lineBreak: false });
+    if (representation.artist) {
+      doc.font('Helvetica-Bold').fontSize(10)
+        .text(`[${representation.artist}]`, MARGIN + 12, bannerTop + 34, { width: usableWidth - 24, lineBreak: false });
+    }
+    return bannerTop + bannerH + 12;
+  }
+  // Condensed header on subsequent pages.
+  doc.fillColor('black').font('Helvetica-Bold').fontSize(11)
+    .text(titleText, MARGIN, MARGIN, { width: usableWidth, lineBreak: false });
+  return MARGIN + 22;
+}
+
+// Lay a paginated representation out onto a pdfkit Letter document.
+function layoutChartPdf(doc, representation) {
   const MARGIN = 48;
-  const CHORD_SIZE = 9; // chords slightly smaller, sitting above lyrics
-  const BODY_SIZE = Number(rendered.formatting && rendered.formatting.size) || 11;
-  const LINE_GAP = 4; // extra space between stacked chord/lyric rows
+  const BODY_SIZE = Number(representation.formatting && representation.formatting.size) || 11;
+  const CHORD_SIZE = Math.max(7, Math.round(BODY_SIZE * 0.85));
+  const LINE_GAP = 3;
   const chordColor = resolveChordColor(
-    rendered.formatting && rendered.formatting.chordColor
+    representation.formatting && representation.formatting.chordColor
   );
-  const columns = rendered.formatting && rendered.formatting.columns === 2 ? 2 : 1;
+  const columns = Math.max(1, Number(representation.formatting && representation.formatting.columns) || 1);
 
   const pageWidth = doc.page.width;
-  const pageBottom = doc.page.height - MARGIN;
   const usableWidth = pageWidth - MARGIN * 2;
-  const COLUMN_GAP = 24;
-  const colWidth =
-    columns === 2 ? (usableWidth - COLUMN_GAP) / 2 : usableWidth;
+  const COLUMN_GAP = 18;
+  const colWidth = columns > 1 ? (usableWidth - COLUMN_GAP * (columns - 1)) / columns : usableWidth;
 
-  // Column cursor state. `col` is the active column index (0-based); `y` is the
-  // current vertical cursor shared across the helpers below.
-  let col = 0;
-  let y = MARGIN;
-
+  const geom = { MARGIN, usableWidth, chordColor };
   const colX = (c) => MARGIN + c * (colWidth + COLUMN_GAP);
+  const charWidth = (size) => { doc.font('Courier').fontSize(size); return doc.widthOfString('M'); };
 
-  // Monospaced metrics: with Courier, every glyph is the same advance width, so
-  // a chord placed at the pixel offset of its lyric segment sits exactly over
-  // the right syllable.
-  const charWidth = (size) => {
-    doc.font('Courier').fontSize(size);
-    return doc.widthOfString('M'); // monospace: any char works
-  };
-
-  // Start a fresh page and reset the cursor to the first column top.
-  const newPage = () => {
-    doc.addPage();
-    col = 0;
-    y = MARGIN;
-  };
-
-  // Move to the next column, or to a new page if already in the last column.
-  const nextColumn = () => {
-    if (col < columns - 1) {
-      col += 1;
-      y = MARGIN;
-    } else {
-      newPage();
-    }
-  };
-
-  // Ensure `height` px fit before pageBottom; advance column/page if not.
-  const ensureSpace = (height) => {
-    if (y + height > pageBottom) {
-      nextColumn();
-    }
-  };
-
-  // Draw a chord-over-lyric content line. A line is a list of segments, each
-  // `{ chord, lyric }`. We render the lyric text left-to-right in a monospaced
-  // font and place each chord just above the first character of its segment.
-  const drawContentLine = (segments) => {
+  const drawContentLine = (segments, x0, y) => {
     const cw = charWidth(BODY_SIZE);
-    const chordRowH = CHORD_SIZE + 2;
-    const lyricRowH = BODY_SIZE + 2;
     const anyChord = segments.some((s) => s.chord);
-    const rowH = (anyChord ? chordRowH : 0) + lyricRowH + LINE_GAP;
-
-    ensureSpace(rowH);
-
-    const x0 = colX(col);
-    const lyricY = y + (anyChord ? chordRowH : 0);
-
-    // First pass: lyrics on the lyric row, tracking each segment's start X.
+    const chordRowH = anyChord ? CHORD_SIZE + 2 : 0;
+    const lyricY = y + chordRowH;
     let x = x0;
     const segStartX = [];
     doc.font('Courier').fontSize(BODY_SIZE).fillColor('black');
     for (const seg of segments) {
       segStartX.push(x);
       const lyric = seg.lyric || '';
-      if (lyric !== '') {
-        doc.text(lyric, x, lyricY, { lineBreak: false });
-      }
+      if (lyric !== '') doc.text(lyric, x, lyricY, { lineBreak: false });
       x += lyric.length * cw;
     }
-
-    // Second pass: chords on the chord row, above their segment's start X.
     if (anyChord) {
       doc.font('Courier-Bold').fontSize(CHORD_SIZE).fillColor(chordColor);
-      segments.forEach((seg, i) => {
-        if (seg.chord) {
-          doc.text(seg.chord, segStartX[i], y, { lineBreak: false });
-        }
-      });
+      segments.forEach((seg, i) => { if (seg.chord) doc.text(seg.chord, segStartX[i], y, { lineBreak: false }); });
       doc.fillColor('black');
     }
-
-    y += rowH;
+    return chordRowH + BODY_SIZE + 2 + LINE_GAP;
   };
 
-  // Draw a blank (stanza) spacer.
-  const drawBlankLine = () => {
-    ensureSpace(BODY_SIZE);
-    y += BODY_SIZE * 0.6;
-  };
+  const pages = representation.pages || [];
+  pages.forEach((page, pageIndex) => {
+    if (pageIndex > 0) doc.addPage();
+    const contentTop = drawHeader(doc, representation, pageIndex, geom);
 
-  // Draw a section header (label + optional "x<repeat>").
-  const drawSectionHeader = (label, repeat) => {
-    const text = (label || '') + (repeat ? `  x${repeat}` : '');
-    if (text.trim() === '') return;
-    const headerH = BODY_SIZE + 6;
-    ensureSpace(headerH + 2);
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(BODY_SIZE + 1)
-      .fillColor('black')
-      .text(text, colX(col), y, { width: colWidth, lineBreak: false });
-    y += headerH;
-  };
-
-  // Draw a small "Transpose +n" marker for a TRANSPOSE_KEY directive line.
-  const drawTransposeMarker = (shift) => {
-    const sign = shift > 0 ? `+${shift}` : `${shift}`;
-    const markerH = CHORD_SIZE + 6;
-    ensureSpace(markerH);
-    doc
-      .font('Helvetica-Oblique')
-      .fontSize(CHORD_SIZE + 1)
-      .fillColor(chordColor)
-      .text(`Transpose ${sign}`, colX(col), y, { width: colWidth, lineBreak: false });
-    doc.fillColor('black');
-    y += markerH;
-  };
-
-  // --- Header block: title, artist, key label ------------------------------
-  if (rendered.title) {
-    doc.font('Helvetica-Bold').fontSize(18).fillColor('black');
-    doc.text(rendered.title, MARGIN, y, { width: usableWidth });
-    y = doc.y + 2;
-  }
-  if (rendered.artistLabel) {
-    doc.font('Helvetica').fontSize(12).fillColor('black');
-    doc.text(rendered.artistLabel, MARGIN, y, { width: usableWidth });
-    y = doc.y + 2;
-  }
-  doc.font('Helvetica-Oblique').fontSize(10).fillColor('black');
-  doc.text(`Key: ${rendered.keyLabel}`, MARGIN, y, { width: usableWidth });
-  y = doc.y + 10;
-
-  // --- Sections ------------------------------------------------------------
-  for (const section of rendered.sections || []) {
-    drawSectionHeader(section.label, section.repeat);
-
-    for (const line of section.lines || []) {
-      if (line.directive === 'PAGE_BREAK') {
-        newPage();
-        continue;
+    (page.columns || []).forEach((column, c) => {
+      let y = contentTop;
+      const x0 = colX(c);
+      for (const line of column.lines || []) {
+        if (line.header) {
+          const text = (line.header.label || '') + (line.header.repeat ? `  x${line.header.repeat}` : '');
+          doc.font('Helvetica-Bold').fontSize(BODY_SIZE + 1).fillColor('black')
+            .text(text, x0, y, { width: colWidth, lineBreak: false });
+          y += BODY_SIZE + 8;
+          continue;
+        }
+        if (line.directive === 'TRANSPOSE_KEY') {
+          const shift = line.transposeShift || 0;
+          const sign = shift > 0 ? `+${shift}` : `${shift}`;
+          doc.font('Helvetica-Oblique').fontSize(CHORD_SIZE + 1).fillColor(chordColor)
+            .text(`Transpose ${sign}`, x0, y, { width: colWidth, lineBreak: false });
+          doc.fillColor('black');
+          y += CHORD_SIZE + 6;
+          continue;
+        }
+        if (!line.segments || line.segments.length === 0) {
+          y += BODY_SIZE * 0.6;
+          continue;
+        }
+        y += drawContentLine(line.segments, x0, y);
       }
-      if (line.directive === 'COLUMN_BREAK') {
-        nextColumn();
-        continue;
-      }
-      if (line.directive === 'TRANSPOSE_KEY') {
-        drawTransposeMarker(line.transposeShift || 0);
-        continue;
-      }
-      // Content line: a blank line has no segments.
-      if (!line.segments || line.segments.length === 0) {
-        drawBlankLine();
-        continue;
-      }
-      drawContentLine(line.segments);
-    }
-
-    // A little breathing room after each section.
-    y += BODY_SIZE * 0.5;
-  }
+    });
+  });
 }
 
 // GET /songs/:id/chart/pdf — render the chart to a downloadable PDF.
-// Query `key`: omitted or 'Numbers' renders the stored numbers body as-is; a
-// key value transposes numbers -> names in that key (422 KEY_INVALID on a bad
-// key). Band-scoped via the song (R9.5). Streams `application/pdf`.
 router.get('/:id/chart/pdf', async (req, res, next) => {
   try {
     const song = await loadScopedSong(req, next);
@@ -521,58 +453,21 @@ router.get('/:id/chart/pdf', async (req, res, next) => {
       return next(err);
     }
 
-    // Resolve the requested representation exactly like GET /:id/chart/view.
-    const requested = typeof req.query.key === 'string' ? req.query.key.trim() : '';
-    const isNumbers = requested === '' || requested === 'Numbers';
+    const keyed = resolveKeyedBody(chart, req, next);
+    if (!keyed) return;
 
-    let rendered;
-    let keyLabel;
-    if (isNumbers) {
-      rendered = renderModel(chart.body);
-      keyLabel = 'Numbers';
-    } else {
-      if (!isSupportedKey(requested)) {
-        const err = new Error(
-          `Unsupported or invalid key "${requested}". Supply a supported major key or "Numbers".`
-        );
-        err.status = 422;
-        err.code = 'KEY_INVALID';
-        err.fields = { key: 'unsupported or invalid key' };
-        return next(err);
-      }
-      rendered = renderModel(numbersToNames(chart.body, requested));
-      keyLabel = requested;
-    }
+    const representation = buildRepresentation(song, chart, keyed.body, keyed.keyLabel);
 
-    // Assemble the full Render_Representation (metadata + sections) the layout
-    // consumes, matching the shape returned by GET /:id/chart/view.
-    const representation = {
-      title: chart.title,
-      artistLabel: chart.artistLabel,
-      keyLabel,
-      formatting: chart.formatting,
-      sections: rendered.sections,
-    };
-
-    // Stream the PDF. Set headers before piping; pdfkit writes incrementally.
-    const filename = sanitizePdfFilename(chart.title || song.title);
+    const filename = sanitizePdfFilename(song.title);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    const doc = new PDFDocument({ size: 'A4', margin: 48, autoFirstPage: true });
-    // If the document errors mid-stream, surface it (headers may already be
-    // sent, in which case we can only abort the response).
+    const doc = new PDFDocument({ size: 'LETTER', margin: 48, autoFirstPage: true });
     doc.on('error', (streamErr) => {
-      if (!res.headersSent) {
-        next(streamErr);
-      } else {
-        res.destroy(streamErr);
-      }
+      if (!res.headersSent) next(streamErr); else res.destroy(streamErr);
     });
     doc.pipe(res);
-
     layoutChartPdf(doc, representation);
-
     doc.end();
   } catch (err) {
     next(err);
@@ -580,24 +475,15 @@ router.get('/:id/chart/pdf', async (req, res, next) => {
 });
 
 // POST /songs/:id/chart/view — render an UN-PERSISTED working body for the
-// editor's live preview. Unlike GET /:id/chart/view, this reads/writes nothing:
-// it interprets a body supplied in the request and renders it on the fly.
-// Body: { body, enteredKey, displayedKey, title?, artistLabel?, formatting? }.
-//   - enteredKey:   how to interpret `body` — ''/'Numbers' = already numbers;
-//                   a key = names (names->numbers via namesToNumbers first).
-//   - displayedKey: how to render — ''/'Numbers' = numbers form; a key =
-//                   numbers->names in that key.
-// Returns the same Render_Representation shape as GET /:id/chart/view. Since
-// nothing is persisted, metadata (title/artistLabel/formatting) is echoed from
-// the request when provided, else defaulted to the Chart schema defaults.
+// editor's live preview. Title/artist are taken from the SONG (not the
+// request). Body: { body, enteredKey, displayedKey, formatting? }.
 router.post('/:id/chart/view', async (req, res, next) => {
   try {
     const song = await loadScopedSong(req, next);
     if (!song) return;
 
-    const { body, enteredKey, displayedKey, title, artistLabel, formatting } = req.body;
+    const { body, enteredKey, displayedKey, formatting } = req.body;
 
-    // The working body is required and must be a string (same as the PUT route).
     if (typeof body !== 'string') {
       const err = new Error('body is required and must be a string');
       err.status = 422;
@@ -606,8 +492,6 @@ router.post('/:id/chart/view', async (req, res, next) => {
       return next(err);
     }
 
-    // Grammar-validate the submitted body (runs for both numbers and names
-    // input; names tokens still parse as chords) — mirrors the PUT route.
     const { valid, fields } = validateChartBody(body);
     if (!valid) {
       const err = new Error('Chart body is invalid');
@@ -617,11 +501,9 @@ router.post('/:id/chart/view', async (req, res, next) => {
       return next(err);
     }
 
-    // --- Interpret `body` per enteredKey -> canonical numbers --------------
-    // A missing/blank enteredKey, or the literal 'Numbers', means numbers mode.
+    // Interpret body per enteredKey -> canonical numbers.
     const entered = typeof enteredKey === 'string' ? enteredKey.trim() : '';
     const isNumbersMode = entered === '' || entered === 'Numbers';
-
     let numbersBody;
     if (isNumbersMode) {
       numbersBody = body;
@@ -635,7 +517,6 @@ router.post('/:id/chart/view', async (req, res, next) => {
         err.fields = { enteredKey: 'unsupported or invalid key' };
         return next(err);
       }
-
       try {
         numbersBody = namesToNumbers(body, entered);
       } catch (convErr) {
@@ -647,16 +528,13 @@ router.post('/:id/chart/view', async (req, res, next) => {
       }
     }
 
-    // --- Render per displayedKey -> Render_Representation -------------------
-    // A missing/blank displayedKey, or 'Numbers', renders the numbers form; any
-    // other value is a target key and must be a supported major key.
+    // Render per displayedKey.
     const displayed = typeof displayedKey === 'string' ? displayedKey.trim() : '';
     const isDisplayNumbers = displayed === '' || displayed === 'Numbers';
-
-    let rendered;
+    let displayBody;
     let keyLabel;
     if (isDisplayNumbers) {
-      rendered = renderModel(numbersBody);
+      displayBody = numbersBody;
       keyLabel = 'Numbers';
     } else {
       if (!isSupportedKey(displayed)) {
@@ -668,20 +546,22 @@ router.post('/:id/chart/view', async (req, res, next) => {
         err.fields = { displayedKey: 'unsupported or invalid key' };
         return next(err);
       }
-      rendered = renderModel(numbersToNames(numbersBody, displayed));
+      displayBody = numbersToNames(numbersBody, displayed);
       keyLabel = displayed;
     }
 
-    // Nothing is persisted, so echo provided metadata or fall back to the
-    // Chart schema defaults (title '', artistLabel '', formatting defaults).
     const defaultFormatting = { font: 'monospace', size: 11, chordColor: 'blue', columns: 1 };
+    const fmt = formatting !== undefined ? formatting : defaultFormatting;
+    const rendered = renderModel(displayBody);
+    const { pages } = paginate(rendered, { formatting: fmt });
 
     res.json({
-      title: title !== undefined ? title : '',
-      artistLabel: artistLabel !== undefined ? artistLabel : '',
+      title: song.title,
+      artist: song.artist,
       keyLabel,
-      formatting: formatting !== undefined ? formatting : defaultFormatting,
+      formatting: fmt,
       sections: rendered.sections,
+      pages,
     });
   } catch (err) {
     next(err);
@@ -689,13 +569,14 @@ router.post('/:id/chart/view', async (req, res, next) => {
 });
 
 // PUT /songs/:id/chart — create or replace the song's chart.
-// Body: { enteredKey, body, title?, artistLabel?, formatting? }.
+// Body: { enteredKey, body, formatting? }. Title/artist are NOT accepted —
+// they belong to the Song.
 router.put('/:id/chart', async (req, res, next) => {
   try {
     const song = await loadScopedSong(req, next);
     if (!song) return;
 
-    const { enteredKey, body, title, artistLabel, formatting } = req.body;
+    const { enteredKey, body, formatting } = req.body;
 
     if (typeof body !== 'string') {
       const err = new Error('body is required and must be a string');
@@ -705,8 +586,6 @@ router.put('/:id/chart', async (req, res, next) => {
       return next(err);
     }
 
-    // Validate the submitted body against the ChordPro-like grammar. This runs
-    // for both numbers and names input (names tokens still parse as chords).
     const { valid, fields } = validateChartBody(body);
     if (!valid) {
       const err = new Error('Chart body is invalid');
@@ -716,17 +595,12 @@ router.put('/:id/chart', async (req, res, next) => {
       return next(err);
     }
 
-    // Determine whether the body is already numbers or needs names->numbers.
-    // A missing/blank enteredKey, or the literal 'Numbers', means numbers mode.
     const entered = typeof enteredKey === 'string' ? enteredKey.trim() : '';
     const isNumbersMode = entered === '' || entered === 'Numbers';
-
     let numbersBody;
     if (isNumbersMode) {
-      // Already numbers (and already grammar-validated): store as-is.
       numbersBody = body;
     } else {
-      // enteredKey names a key: it must be a supported major key.
       if (!isSupportedKey(entered)) {
         const err = new Error(
           `Unsupported or invalid key "${entered}". Supply a supported major key or "Numbers".`
@@ -736,9 +610,6 @@ router.put('/:id/chart', async (req, res, next) => {
         err.fields = { enteredKey: 'unsupported or invalid key' };
         return next(err);
       }
-
-      // Convert names -> canonical numbers. A conversion failure (e.g. a token
-      // in the wrong representation) is a 422 against the body/key.
       try {
         numbersBody = namesToNumbers(body, entered);
       } catch (convErr) {
@@ -750,12 +621,7 @@ router.put('/:id/chart', async (req, res, next) => {
       }
     }
 
-    // Build the fields to persist. Upsert on `song` so a repeat PUT replaces
-    // the existing chart, preserving the 1:1 (R7.4). Only set metadata that was
-    // provided so an omitted field falls back to the schema default on insert.
     const update = { song: song._id, body: numbersBody };
-    if (title !== undefined) update.title = title;
-    if (artistLabel !== undefined) update.artistLabel = artistLabel;
     if (formatting !== undefined) update.formatting = formatting;
 
     const chart = await Chart.findOneAndUpdate(
@@ -764,8 +630,7 @@ router.put('/:id/chart', async (req, res, next) => {
       { upsert: true, new: true, setDefaultsOnInsert: true, runValidators: true }
     );
 
-    // 200 for both create and replace (documented choice above).
-    res.json(serializeChart(chart));
+    res.json({ ...serializeChart(chart), title: song.title, artist: song.artist });
   } catch (err) {
     next(err);
   }

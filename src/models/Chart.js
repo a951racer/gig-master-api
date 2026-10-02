@@ -11,14 +11,9 @@ const chartSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    title: {
-      type: String,
-      default: '',
-    },
-    artistLabel: {
-      type: String,
-      default: '',
-    },
+    // NOTE: title and artist are NOT stored on the chart. They are properties
+    // of the Song and are derived from it at render time (song.title /
+    // song.artist). The chart only owns its body + presentation formatting.
     formatting: {
       font: {
         type: String,
