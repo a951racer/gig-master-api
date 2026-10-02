@@ -68,11 +68,15 @@ describe('Chart model — Property 1: one chart per song (Requirement 1.2)', () 
 });
 
 describe('Chart model — field defaults (Requirements 1.3, 1.4)', () => {
-  it('defaults title and artistLabel to empty strings', async () => {
+  it('does NOT store title or artistLabel (title/artist are Song properties)', async () => {
     const chart = await Chart.create({ song: oid(), body: '[1]Default test' });
 
-    expect(chart.title).toBe('');
-    expect(chart.artistLabel).toBe('');
+    // Title/artist are derived from the Song at render time and are not fields
+    // on the Chart schema.
+    expect(chart.title).toBeUndefined();
+    expect(chart.artistLabel).toBeUndefined();
+    expect(chart.schema.path('title')).toBeUndefined();
+    expect(chart.schema.path('artistLabel')).toBeUndefined();
   });
 
   it('defaults formatting to font monospace / size 11 / chordColor blue / columns 1', async () => {

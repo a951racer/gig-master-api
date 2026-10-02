@@ -140,7 +140,61 @@ describe('GET /songs/:id/chart/view', () => {
     expect(segments.map((s) => s.chord)).toEqual(['1', '4']);
   });
 
-  it('key=KEY transposes numbers to names in that key (G): 1->G, 4->C, keyLabel=G', async () => {
+  it('derives title/artist from the SONG and returns a paginated pages structure', async () => {
+    const { token, band, song } = await seedChartedSong();
+
+    const res = await auth(
+      request(app).get(`/songs/${song._id}/chart/view?key=Numbers`),
+      token,
+      band
+    );
+
+    expect(res.status).toBe(200);
+    // Title/artist come from the Song (createSong defaults), NOT the chart.
+    expect(res.body.title).toBe('Test Song');
+    expect(res.body.artist).toBe('Test Artist');
+    // The chart carries no title/artistLabel of its own.
+    expect(res.body.artistLabel).toBeUndefined();
+
+    // Paginated structure: pages -> columns -> lines.
+    expect(Array.isArray(res.body.pages)).toBe(true);
+    expect(res.body.pages.length).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(res.body.pages[0].columns)).toBe(true);
+    // Single-column default.
+    expect(res.body.pages[0].columns).toHaveLength(1);
+  });
+
+  it('two-column formatting + COLUMN_BREAK splits content across columns and emits no COLUMN_BREAK line', async () => {
+    const admin = await createUser('cols-admin@example.com');
+    const band = await createBandWithAdmin(admin, 'Cols Band');
+    const member = await createMember(band, 'cols-member@example.com');
+    const token = await tokenFor(member._id);
+    const song = await createSong(band);
+
+    // Save a 2-column chart with a COLUMN_BREAK between two verses.
+    const put = await auth(request(app).put(`/songs/${song._id}/chart`), token, band).send({
+      enteredKey: 'Numbers',
+      body: 'VERSE 1\n[1]A\nCOLUMN_BREAK\nVERSE 2\n[5]B',
+      formatting: { font: 'monospace', size: 11, chordColor: 'blue', columns: 2 },
+    });
+    expect(put.status).toBe(200);
+
+    const res = await auth(
+      request(app).get(`/songs/${song._id}/chart/view?key=Numbers`),
+      token,
+      band
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.pages[0].columns).toHaveLength(2);
+    // No COLUMN_BREAK leaks into any rendered line.
+    expect(JSON.stringify(res.body.pages)).not.toContain('COLUMN_BREAK');
+    const col0Headers = res.body.pages[0].columns[0].lines.filter((l) => l.header).map((l) => l.header.label);
+    const col1Headers = res.body.pages[0].columns[1].lines.filter((l) => l.header).map((l) => l.header.label);
+    expect(col0Headers).toContain('VERSE 1');
+    expect(col1Headers).toContain('VERSE 2');
+  });
+
+    it('key=KEY transposes numbers to names in that key (G): 1->G, 4->C, keyLabel=G', async () => {
     const { token, band, song } = await seedChartedSong();
 
     const res = await auth(
