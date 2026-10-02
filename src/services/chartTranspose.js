@@ -368,10 +368,19 @@ function parseTransposeDirective(line) {
  * @param {(token: string) => string} transformToken
  * @returns {string}
  */
-function transformChordTokens(line, transformToken) {
+function transformChordTokens(line, transformToken, lenient = false) {
   return line.replace(/\[([^\]]*)\]/g, (whole, inner) => {
-    const converted = transformToken(inner);
-    return `[${converted}]`;
+    try {
+      const converted = transformToken(inner);
+      return `[${converted}]`;
+    } catch (err) {
+      // In lenient mode a token we cannot parse/convert is left EXACTLY as the
+      // author typed it (brackets preserved), so the valid chords around it
+      // still render while the bad one shows verbatim. In strict mode the
+      // error propagates (used by the save path when it must be canonical).
+      if (lenient) return whole;
+      throw err;
+    }
   });
 }
 
@@ -446,7 +455,7 @@ function numberRootToName(numberRoot, key, runningOffset) {
  * @throws {Error} if `key` is unsupported, or a token is malformed / in the
  *   wrong (numbers) representation.
  */
-function namesToNumbers(body, key) {
+function namesToNumbers(body, key, options = {}) {
   if (typeof body !== 'string') {
     throw new Error(
       `Invalid chart body: expected a string but received ${typeof body}.`
@@ -460,6 +469,7 @@ function namesToNumbers(body, key) {
     );
   }
 
+  const lenient = options.lenient === true;
   const canonicalKey = normalizeKey(key);
   const baseTonicPc = keyTonicPitchClass(canonicalKey);
   const { lines, eols } = splitLines(body);
@@ -491,7 +501,7 @@ function namesToNumbers(body, key) {
         result += '/' + nameRootToNumber(parsed.bass, activeTonicPc);
       }
       return result;
-    });
+    }, lenient);
     return converted + eols[i];
   });
 
@@ -514,7 +524,7 @@ function namesToNumbers(body, key) {
  * @throws {Error} if `key` is unsupported, or a token is malformed / in the
  *   wrong (names) representation.
  */
-function numbersToNames(body, key) {
+function numbersToNames(body, key, options = {}) {
   if (typeof body !== 'string') {
     throw new Error(
       `Invalid chart body: expected a string but received ${typeof body}.`
@@ -528,6 +538,7 @@ function numbersToNames(body, key) {
     );
   }
 
+  const lenient = options.lenient === true;
   const canonicalKey = normalizeKey(key);
   const { lines, eols } = splitLines(body);
 
@@ -558,7 +569,7 @@ function numbersToNames(body, key) {
         result += '/' + numberRootToName(parsed.bass, canonicalKey, offsetForLine);
       }
       return result;
-    });
+    }, lenient);
     return converted + eols[i];
   });
 

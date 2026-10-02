@@ -316,7 +316,32 @@ describe('POST /songs/:id/chart/view — un-persisted preview', () => {
     expect(segments).toEqual([{ chord: 'D', lyric: 'Hi' }]);
   });
 
-  it('returns 422 KEY_INVALID for a bad enteredKey', async () => {
+  it('LENIENTLY renders a mix of valid and unparseable tokens — valid ones convert, bad ones stay verbatim', async () => {
+    const admin = await createUser('lenient-admin@example.com');
+    const band = await createBandWithAdmin(admin, 'Lenient Band');
+    const member = await createMember(band, 'lenient-member@example.com');
+    const token = await tokenFor(member._id);
+    const song = await createSong(band);
+
+    // Entered in A: [A] -> 1, [C5] -> b35 (power chord), but [Verse 1] is not a
+    // chord. Displayed as Numbers. The request must succeed (200), convert the
+    // valid chords, and keep the bad token's text verbatim.
+    const res = await auth(
+      request(app).post(`/songs/${song._id}/chart/view`),
+      token,
+      band
+    ).send({ body: '[A]Hi [C5]there [Verse 1]x', enteredKey: 'A', displayedKey: 'Numbers' });
+
+    expect(res.status).toBe(200);
+    const segments = res.body.sections[0].lines[0].segments;
+    // Valid chords converted to numbers; the unparseable token left verbatim.
+    const chords = segments.map((s) => s.chord).filter(Boolean);
+    expect(chords).toContain('1');       // [A] -> 1
+    expect(chords).toContain('b35');     // [C5] -> b35
+    expect(chords).toContain('Verse 1'); // unparseable, verbatim
+  });
+
+    it('returns 422 KEY_INVALID for a bad enteredKey', async () => {
     const admin = await createUser('admin5@example.com');
     const band = await createBandWithAdmin(admin);
     const member = await createMember(band, 'member5@example.com');

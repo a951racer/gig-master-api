@@ -7,7 +7,6 @@ const Chart = require('../models/Chart');
 const authenticate = require('../middleware/authenticate');
 const bandScope = require('../middleware/bandScope');
 const { namesToNumbers, numbersToNames, renderModel } = require('../services/chartTranspose');
-const { validateChartBody } = require('../services/chartGrammar');
 const { isSupportedKey } = require('../services/chartSpelling');
 const { paginate } = require('../services/chartLayout');
 
@@ -248,7 +247,9 @@ function resolveKeyedBody(chart, req, next, field = 'key') {
     next(err);
     return null;
   }
-  return { body: numbersToNames(chart.body, requested), keyLabel: requested };
+  // Lenient: an unparseable stored token (shouldn't normally happen, but a
+  // lenient save can persist one) is left verbatim rather than failing the view.
+  return { body: numbersToNames(chart.body, requested, { lenient: true }), keyLabel: requested };
 }
 
 // GET /songs/:id/chart — stored canonical chart, or 404 CHART_NOT_FOUND.
@@ -492,16 +493,12 @@ router.post('/:id/chart/view', async (req, res, next) => {
       return next(err);
     }
 
-    const { valid, fields } = validateChartBody(body);
-    if (!valid) {
-      const err = new Error('Chart body is invalid');
-      err.status = 422;
-      err.code = 'CHART_INVALID';
-      err.fields = fields;
-      return next(err);
-    }
-
-    // Interpret body per enteredKey -> canonical numbers.
+    // The preview is intentionally LENIENT (R: render the valid parts, show the
+    // unparseable bits verbatim). We do NOT reject the whole body on a bad chord
+    // token — only an unsupported KEY is a real error, since without a valid key
+    // we don't know how to interpret/spell the names. Each conversion runs in
+    // lenient mode so a malformed [token] is left exactly as typed while the
+    // chords around it convert normally.
     const entered = typeof enteredKey === 'string' ? enteredKey.trim() : '';
     const isNumbersMode = entered === '' || entered === 'Numbers';
     let numbersBody;
@@ -517,18 +514,10 @@ router.post('/:id/chart/view', async (req, res, next) => {
         err.fields = { enteredKey: 'unsupported or invalid key' };
         return next(err);
       }
-      try {
-        numbersBody = namesToNumbers(body, entered);
-      } catch (convErr) {
-        const err = new Error(convErr.message || 'Could not convert chart to numbers');
-        err.status = 422;
-        err.code = 'KEY_INVALID';
-        err.fields = { body: convErr.message || 'conversion failed' };
-        return next(err);
-      }
+      numbersBody = namesToNumbers(body, entered, { lenient: true });
     }
 
-    // Render per displayedKey.
+    // Render per displayedKey (also lenient).
     const displayed = typeof displayedKey === 'string' ? displayedKey.trim() : '';
     const isDisplayNumbers = displayed === '' || displayed === 'Numbers';
     let displayBody;
@@ -546,7 +535,7 @@ router.post('/:id/chart/view', async (req, res, next) => {
         err.fields = { displayedKey: 'unsupported or invalid key' };
         return next(err);
       }
-      displayBody = numbersToNames(numbersBody, displayed);
+      displayBody = numbersToNames(numbersBody, displayed, { lenient: true });
       keyLabel = displayed;
     }
 
@@ -586,15 +575,11 @@ router.put('/:id/chart', async (req, res, next) => {
       return next(err);
     }
 
-    const { valid, fields } = validateChartBody(body);
-    if (!valid) {
-      const err = new Error('Chart body is invalid');
-      err.status = 422;
-      err.code = 'CHART_INVALID';
-      err.fields = fields;
-      return next(err);
-    }
-
+    // Saving is LENIENT and consistent with the preview: we never refuse to
+    // save a chart because of a bad chord token. An unsupported KEY is still a
+    // real error (we can't interpret names without one), but a malformed
+    // [token] is left verbatim in the stored body so a work-in-progress always
+    // saves and the author can fix the token later.
     const entered = typeof enteredKey === 'string' ? enteredKey.trim() : '';
     const isNumbersMode = entered === '' || entered === 'Numbers';
     let numbersBody;
@@ -610,15 +595,7 @@ router.put('/:id/chart', async (req, res, next) => {
         err.fields = { enteredKey: 'unsupported or invalid key' };
         return next(err);
       }
-      try {
-        numbersBody = namesToNumbers(body, entered);
-      } catch (convErr) {
-        const err = new Error(convErr.message || 'Could not convert chart to numbers');
-        err.status = 422;
-        err.code = 'KEY_INVALID';
-        err.fields = { body: convErr.message || 'conversion failed' };
-        return next(err);
-      }
+      numbersBody = namesToNumbers(body, entered, { lenient: true });
     }
 
     const update = { song: song._id, body: numbersBody };

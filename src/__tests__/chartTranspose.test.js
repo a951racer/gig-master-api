@@ -339,3 +339,33 @@ describe('chartTranspose — edge cases', () => {
     expect(() => parseChord('5/F')).toThrow(/cannot mix numbers and names/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Lenient conversion (per-token resilience): a malformed/wrong-mode [token] is
+// left verbatim instead of throwing, so valid chords around it still convert.
+// ---------------------------------------------------------------------------
+describe('lenient conversion — per-token resilience', () => {
+  it('namesToNumbers leaves an unparseable token verbatim and converts the rest', () => {
+    const { namesToNumbers } = require('../services/chartTranspose');
+    const body = 'INTRO\n[A] [C5] [Verse 1] [D]';
+    // Strict throws; lenient keeps the bad token and converts the good ones.
+    expect(() => namesToNumbers(body, 'A')).toThrow();
+    const out = namesToNumbers(body, 'A', { lenient: true });
+    // [A]->1, [C5]->b35, [Verse 1] stays verbatim, [D]->4 in key A.
+    expect(out).toContain('[1]');
+    expect(out).toContain('[b35]');
+    expect(out).toContain('[Verse 1]');
+    expect(out).toContain('[4]');
+  });
+
+  it('numbersToNames leaves an unparseable/wrong-mode token verbatim and converts the rest', () => {
+    const { numbersToNames } = require('../services/chartTranspose');
+    // [G] is a names token (wrong mode for numbers->names); should stay verbatim
+    // in lenient mode while [1] converts to the key name.
+    const body = '[1]ok [G]verbatim';
+    expect(() => numbersToNames(body, 'G')).toThrow();
+    const out = numbersToNames(body, 'G', { lenient: true });
+    expect(out).toContain('[G]'); // [1] in G -> G
+    expect(out).toContain('verbatim');
+  });
+})

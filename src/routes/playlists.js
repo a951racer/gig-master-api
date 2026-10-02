@@ -208,7 +208,7 @@ router.get('/:id/charts', async (req, res, next) => {
       if (chartDoc) {
         const rendered = isNumbers
           ? renderModel(chartDoc.body)
-          : renderModel(numbersToNames(chartDoc.body, requested));
+          : renderModel(numbersToNames(chartDoc.body, requested, { lenient: true }));
         const { pages } = paginate(rendered, { formatting: chartDoc.formatting });
         chart = {
           // Title/artist are song properties, not chart-overridable.
