@@ -31,4 +31,14 @@ const bandSchema = new mongoose.Schema(
 
 bandSchema.index({ administrator: 1 });
 
+// Band names must be unique across the whole app, case-insensitively ("The
+// Owls" and "the owls" collide). Case-insensitivity comes from the collation
+// (locale 'en', strength 2 = compare ignoring case/diacritics). Archived bands
+// still occupy their name (an archived band can be unarchived, which would
+// otherwise collide), so the index intentionally has no archive filter.
+bandSchema.index(
+  { name: 1 },
+  { unique: true, collation: { locale: 'en', strength: 2 } }
+);
+
 module.exports = mongoose.model('Band', bandSchema);
