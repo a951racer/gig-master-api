@@ -5,7 +5,7 @@ const Genre = require('../models/Genre');
 const Chart = require('../models/Chart');
 const authenticate = require('../middleware/authenticate');
 const bandScope = require('../middleware/bandScope');
-const { namesToNumbers } = require('../services/chartTranspose');
+const { namesToNumbers, numbersToNames, renderModel } = require('../services/chartTranspose');
 const { validateChartBody } = require('../services/chartGrammar');
 const { isSupportedKey } = require('../services/chartSpelling');
 
@@ -151,7 +151,10 @@ router.delete('/:id', async (req, res, next) => {
       return next(err);
     }
 
+    // Cascade: a chart is owned by its song (R1.6), so remove it when the song
+    // is removed. Independent collections, so either order is fine.
     await song.deleteOne();
+    await Chart.deleteOne({ song: song._id });
     res.json({ message: 'Song deleted' });
   } catch (err) {
     next(err);
@@ -220,6 +223,171 @@ router.get('/:id/chart', async (req, res, next) => {
     }
 
     res.json(serializeChart(chart));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /songs/:id/chart/view — render the chart in a chosen representation.
+// Query `key`: omitted or 'Numbers' renders the stored numbers body as-is;
+// a key value transposes numbers -> names in that key. Returns the
+// Render_Representation (title/artistLabel/keyLabel/formatting/sections).
+router.get('/:id/chart/view', async (req, res, next) => {
+  try {
+    const song = await loadScopedSong(req, next);
+    if (!song) return;
+
+    const chart = await Chart.findOne({ song: song._id });
+    if (!chart) {
+      const err = new Error('This song has no chart');
+      err.status = 404;
+      err.code = 'CHART_NOT_FOUND';
+      return next(err);
+    }
+
+    // Resolve the requested display representation. A missing/blank `key`, or
+    // the literal 'Numbers', renders the stored numbers body directly; any
+    // other value is a target key and must be a supported major key.
+    const requested = typeof req.query.key === 'string' ? req.query.key.trim() : '';
+    const isNumbers = requested === '' || requested === 'Numbers';
+
+    let rendered;
+    let keyLabel;
+    if (isNumbers) {
+      rendered = renderModel(chart.body);
+      keyLabel = 'Numbers';
+    } else {
+      if (!isSupportedKey(requested)) {
+        const err = new Error(
+          `Unsupported or invalid key "${requested}". Supply a supported major key or "Numbers".`
+        );
+        err.status = 422;
+        err.code = 'KEY_INVALID';
+        err.fields = { key: 'unsupported or invalid key' };
+        return next(err);
+      }
+      rendered = renderModel(numbersToNames(chart.body, requested));
+      keyLabel = requested;
+    }
+
+    // Wrap the rendered { sections } with the metadata the viewer needs,
+    // matching the Render_Representation shape in design.md.
+    res.json({
+      title: chart.title,
+      artistLabel: chart.artistLabel,
+      keyLabel,
+      formatting: chart.formatting,
+      sections: rendered.sections,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /songs/:id/chart/view — render an UN-PERSISTED working body for the
+// editor's live preview. Unlike GET /:id/chart/view, this reads/writes nothing:
+// it interprets a body supplied in the request and renders it on the fly.
+// Body: { body, enteredKey, displayedKey, title?, artistLabel?, formatting? }.
+//   - enteredKey:   how to interpret `body` — ''/'Numbers' = already numbers;
+//                   a key = names (names->numbers via namesToNumbers first).
+//   - displayedKey: how to render — ''/'Numbers' = numbers form; a key =
+//                   numbers->names in that key.
+// Returns the same Render_Representation shape as GET /:id/chart/view. Since
+// nothing is persisted, metadata (title/artistLabel/formatting) is echoed from
+// the request when provided, else defaulted to the Chart schema defaults.
+router.post('/:id/chart/view', async (req, res, next) => {
+  try {
+    const song = await loadScopedSong(req, next);
+    if (!song) return;
+
+    const { body, enteredKey, displayedKey, title, artistLabel, formatting } = req.body;
+
+    // The working body is required and must be a string (same as the PUT route).
+    if (typeof body !== 'string') {
+      const err = new Error('body is required and must be a string');
+      err.status = 422;
+      err.code = 'CHART_INVALID';
+      err.fields = { body: 'required' };
+      return next(err);
+    }
+
+    // Grammar-validate the submitted body (runs for both numbers and names
+    // input; names tokens still parse as chords) — mirrors the PUT route.
+    const { valid, fields } = validateChartBody(body);
+    if (!valid) {
+      const err = new Error('Chart body is invalid');
+      err.status = 422;
+      err.code = 'CHART_INVALID';
+      err.fields = fields;
+      return next(err);
+    }
+
+    // --- Interpret `body` per enteredKey -> canonical numbers --------------
+    // A missing/blank enteredKey, or the literal 'Numbers', means numbers mode.
+    const entered = typeof enteredKey === 'string' ? enteredKey.trim() : '';
+    const isNumbersMode = entered === '' || entered === 'Numbers';
+
+    let numbersBody;
+    if (isNumbersMode) {
+      numbersBody = body;
+    } else {
+      if (!isSupportedKey(entered)) {
+        const err = new Error(
+          `Unsupported or invalid key "${entered}". Supply a supported major key or "Numbers".`
+        );
+        err.status = 422;
+        err.code = 'KEY_INVALID';
+        err.fields = { enteredKey: 'unsupported or invalid key' };
+        return next(err);
+      }
+
+      try {
+        numbersBody = namesToNumbers(body, entered);
+      } catch (convErr) {
+        const err = new Error(convErr.message || 'Could not convert chart to numbers');
+        err.status = 422;
+        err.code = 'KEY_INVALID';
+        err.fields = { body: convErr.message || 'conversion failed' };
+        return next(err);
+      }
+    }
+
+    // --- Render per displayedKey -> Render_Representation -------------------
+    // A missing/blank displayedKey, or 'Numbers', renders the numbers form; any
+    // other value is a target key and must be a supported major key.
+    const displayed = typeof displayedKey === 'string' ? displayedKey.trim() : '';
+    const isDisplayNumbers = displayed === '' || displayed === 'Numbers';
+
+    let rendered;
+    let keyLabel;
+    if (isDisplayNumbers) {
+      rendered = renderModel(numbersBody);
+      keyLabel = 'Numbers';
+    } else {
+      if (!isSupportedKey(displayed)) {
+        const err = new Error(
+          `Unsupported or invalid key "${displayed}". Supply a supported major key or "Numbers".`
+        );
+        err.status = 422;
+        err.code = 'KEY_INVALID';
+        err.fields = { displayedKey: 'unsupported or invalid key' };
+        return next(err);
+      }
+      rendered = renderModel(numbersToNames(numbersBody, displayed));
+      keyLabel = displayed;
+    }
+
+    // Nothing is persisted, so echo provided metadata or fall back to the
+    // Chart schema defaults (title '', artistLabel '', formatting defaults).
+    const defaultFormatting = { font: 'monospace', size: 11, chordColor: 'blue', columns: 1 };
+
+    res.json({
+      title: title !== undefined ? title : '',
+      artistLabel: artistLabel !== undefined ? artistLabel : '',
+      keyLabel,
+      formatting: formatting !== undefined ? formatting : defaultFormatting,
+      sections: rendered.sections,
+    });
   } catch (err) {
     next(err);
   }
