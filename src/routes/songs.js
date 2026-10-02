@@ -1,6 +1,16 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const PDFDocument = require('pdfkit');
+const path = require('path');
+
+// Embedded body font for the PDF: DejaVu Sans Mono (a SANS-SERIF MONOSPACE
+// face). Bundled under src/assets/fonts so it is available in every deploy
+// environment regardless of system fonts. Registered on each PDFDocument as
+// 'mono' / 'mono-bold' (see registerBodyFonts). Headers stay on the built-in
+// Helvetica. (DejaVu fonts: free, Bitstream Vera-derived license — see
+// src/assets/fonts/LICENSE.txt.)
+const MONO_REGULAR_PATH = path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSansMono.ttf');
+const MONO_BOLD_PATH = path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSansMono-Bold.ttf');
 const Song = require('../models/Song');
 const Genre = require('../models/Genre');
 const Chart = require('../models/Chart');
@@ -365,6 +375,10 @@ function drawHeader(doc, representation, pageIndex, geom) {
 
 // Lay a paginated representation out onto a pdfkit Letter document.
 function layoutChartPdf(doc, representation) {
+  // Register the embedded sans-serif monospace body font on this document.
+  doc.registerFont('mono', MONO_REGULAR_PATH);
+  doc.registerFont('mono-bold', MONO_BOLD_PATH);
+
   const MARGIN = 48;
   const BODY_SIZE = Number(representation.formatting && representation.formatting.size) || 11;
   const CHORD_SIZE = Math.max(7, Math.round(BODY_SIZE * 0.85));
@@ -382,14 +396,14 @@ function layoutChartPdf(doc, representation) {
   const geom = { MARGIN, usableWidth, chordColor };
   const colX = (c) => MARGIN + c * (colWidth + COLUMN_GAP);
 
-  // Fonts: use a SANS-SERIF family throughout (Helvetica), matching the title /
-  // artist / section headers. Lyrics are Helvetica; chords Helvetica-Bold; the
-  // superscript quality is a smaller Helvetica-Bold. Because Helvetica is
-  // PROPORTIONAL (unlike the old Courier), we cannot assume a fixed character
-  // width — every advance is MEASURED with doc.widthOfString(...) so chords stay
-  // aligned over the lyric syllable they sit on.
-  const LYRIC_FONT = 'Helvetica';
-  const CHORD_FONT = 'Helvetica-Bold';
+  // Fonts: lyrics and chords use DejaVu Sans Mono — a SANS-SERIF MONOSPACE
+  // face registered above as 'mono' / 'mono-bold'. The title / artist / section
+  // headers remain Helvetica (set at their own draw sites). All horizontal
+  // advances are MEASURED with doc.widthOfString(...) — correct for any font —
+  // so chords stay aligned over the lyric syllable they sit on and chord-only
+  // lines keep their spacing.
+  const LYRIC_FONT = 'mono';
+  const CHORD_FONT = 'mono-bold';
   const SUP_SIZE = Math.max(6, Math.round(CHORD_SIZE * 0.7)); // superscript quality
 
   // Measure a string's drawn width at a given font/size.
@@ -450,9 +464,8 @@ function layoutChartPdf(doc, representation) {
     // Walk segments left-to-right. Each segment advances x by the GREATER of
     // its MEASURED lyric width and its MEASURED chord width (+ a space gap) so a
     // chord wider than its lyric — e.g. a chord-only INTRO line — pushes the
-    // next segment over instead of overlapping it. Measuring (vs assuming a
-    // fixed char width) keeps chords aligned over their syllable in the
-    // proportional sans-serif font.
+    // next segment over instead of overlapping it. Measuring the drawn widths
+    // keeps chords aligned over their syllable (correct for any font).
     let x = x0;
     for (const seg of segments) {
       const lyric = seg.lyric || '';
