@@ -24,6 +24,7 @@ const express = require('express');
 const User = require('../models/User');
 const Band = require('../models/Band');
 const Song = require('../models/Song');
+const Chart = require('../models/Chart');
 const Playlist = require('../models/Playlist');
 const Gig = require('../models/Gig');
 const Genre = require('../models/Genre');
@@ -555,9 +556,14 @@ router.delete('/bands/:id', async (req, res, next) => {
 
     await membershipService.withOptionalTransaction(async (session) => {
       const opts = session ? { session } : {};
+      // Charts are keyed by `song` (not `band`), so resolve the band's song ids
+      // first and cascade the charts via `{ song: { $in: songIds } }` (R1.6).
+      // An empty songIds is fine — `$in: []` deletes nothing.
+      const songIds = (await Song.find({ band: bandId }, { _id: 1 }, opts)).map((d) => d._id);
       // Delete all band-owned resources.
       await Promise.all([
         Song.deleteMany({ band: bandId }, opts),
+        Chart.deleteMany({ song: { $in: songIds } }, opts),
         Playlist.deleteMany({ band: bandId }, opts),
         Gig.deleteMany({ band: bandId }, opts),
         Genre.deleteMany({ band: bandId }, opts),
