@@ -244,24 +244,33 @@ describe('GET /songs/:id/chart — no chart (Property 8)', () => {
   });
 });
 
-describe('PUT /songs/:id/chart — validation (422s)', () => {
-  it('rejects a body with bad grammar with 422 CHART_INVALID and fields', async () => {
+describe('PUT /songs/:id/chart — lenient save + key validation', () => {
+  it('LENIENTLY saves a body containing an unparseable token (stored verbatim), not a 422', async () => {
     const { band, token, song } = await setupMemberWithSong();
 
-    // `[9]` is not a valid chord token (degrees are 1-7), so grammar validation
-    // rejects the body.
+    // A body mixing valid chords with an unparseable token. Saving is lenient:
+    // the chart is stored (so a work-in-progress is never lost) with the bad
+    // token left exactly as typed; the valid chords are preserved too.
+    const body = 'INTRO\n[1] [bad token] [4]';
     const put = await authed(
       request(app).put(`/songs/${song._id}/chart`),
       token,
       band._id
-    ).send({ enteredKey: 'Numbers', body: '[9zz]broken chord' });
+    ).send({ enteredKey: 'Numbers', body });
 
-    expect(put.status).toBe(422);
-    expect(put.body.error.code).toBe('CHART_INVALID');
-    expect(put.body.error.fields).toBeTruthy();
+    expect(put.status).toBe(200);
+
+    const get = await authed(
+      request(app).get(`/songs/${song._id}/chart`),
+      token,
+      band._id
+    );
+    expect(get.status).toBe(200);
+    // Valid tokens kept; the unparseable one stored verbatim.
+    expect(get.body.body).toBe(body);
   });
 
-  it('rejects an unsupported enteredKey with 422 KEY_INVALID', async () => {
+  it('still rejects an unsupported enteredKey with 422 KEY_INVALID', async () => {
     const { band, token, song } = await setupMemberWithSong();
 
     const put = await authed(
