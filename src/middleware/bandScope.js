@@ -16,6 +16,7 @@ function bandScope(req, res, next) {
   }
 
   req.currentBand = bandId;
+  req.currentBandName = entry.name || '';
   req.currentBandIsAdmin = entry.isAdmin === true;
   next();
 }
