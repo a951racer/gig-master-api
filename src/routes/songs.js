@@ -356,8 +356,13 @@ function drawHeader(doc, representation, pageIndex, geom) {
   if (pageIndex === 0) {
     const bannerTop = MARGIN;
     const bannerH = 56;
+    // Tint the banner from the chart's chord color at low opacity (a light
+    // wash over the white page), so the header accent follows formatting.
+    // chordColor. save()/restore() scopes the fillOpacity so later draws are
+    // fully opaque again.
     doc.save();
-    doc.rect(MARGIN, bannerTop, usableWidth, bannerH).fill('#e5e5e5');
+    doc.fillOpacity(0.3);
+    doc.rect(MARGIN, bannerTop, usableWidth, bannerH).fill(chordColor);
     doc.restore();
     doc.fillColor('black').font('Helvetica-Bold').fontSize(18)
       .text(titleText, MARGIN + 12, bannerTop + 8, { width: usableWidth - 24, lineBreak: false });
