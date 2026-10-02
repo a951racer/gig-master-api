@@ -6,6 +6,20 @@ const bandScope = require('../middleware/bandScope');
 
 const router = express.Router();
 
+// A MongoDB duplicate-key error (E11000) on the { band, name } unique index
+// means a playlist with this name already exists in the band. Surface it as a
+// 409 with a user-friendly message rather than a 500.
+function isDuplicateNameError(err) {
+  return err && (err.code === 11000 || err.code === 11001);
+}
+
+function duplicateNameError() {
+  const err = new Error('A playlist with that name already exists in this band');
+  err.status = 409;
+  err.code = 'DUPLICATE_NAME';
+  return err;
+}
+
 router.use(authenticate);
 router.use(bandScope);
 
@@ -80,7 +94,12 @@ router.post('/', async (req, res, next) => {
     }
 
     const playlist = new Playlist({ band: req.currentBand, name, description, songs: songIds });
-    await playlist.save();
+    try {
+      await playlist.save();
+    } catch (err) {
+      if (isDuplicateNameError(err)) return next(duplicateNameError());
+      throw err;
+    }
     res.status(201).json(playlist);
   } catch (err) {
     next(err);
@@ -121,7 +140,12 @@ router.patch('/:id', async (req, res, next) => {
     if (name !== undefined) playlist.name = name;
     if (description !== undefined) playlist.description = description;
 
-    await playlist.save();
+    try {
+      await playlist.save();
+    } catch (err) {
+      if (isDuplicateNameError(err)) return next(duplicateNameError());
+      throw err;
+    }
     res.json(playlist);
   } catch (err) {
     next(err);

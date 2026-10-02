@@ -132,3 +132,86 @@ describe('POST /playlists with songs[] (copy support)', () => {
     expect(res.body.error.code).toBe('VALIDATION_ERROR');
   });
 });
+
+describe('Playlist name uniqueness within a band', () => {
+  it('rejects a duplicate name in the same band with 409 DUPLICATE_NAME', async () => {
+    const { band, token } = await setup();
+
+    const first = await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'Our Stuff' });
+    expect(first.status).toBe(201);
+
+    const dup = await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'Our Stuff' });
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe('DUPLICATE_NAME');
+
+    expect(await Playlist.countDocuments({ band: band._id })).toBe(1);
+  });
+
+  it('treats names case-insensitively ("Our Stuff" vs "our stuff")', async () => {
+    const { band, token } = await setup();
+
+    await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'Our Stuff' });
+
+    const dup = await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'our stuff' });
+
+    expect(dup.status).toBe(409);
+    expect(dup.body.error.code).toBe('DUPLICATE_NAME');
+  });
+
+  it('allows the SAME name in a different band', async () => {
+    const { band, token } = await setup();
+
+    await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'Shared Name' });
+
+    // A second band with its own admin/token.
+    const passwordHash = await authService.hashPassword(PASSWORD);
+    const admin2 = await User.create({ email: 'pl-admin2@example.com', passwordHash });
+    const band2 = await Band.create({ name: 'PL Band 2', administrator: admin2._id });
+    await membershipService.setAdministrator(band2._id, admin2._id);
+    const token2 = await tokenFor(admin2._id);
+
+    const res = await request(app)
+      .post('/playlists')
+      .set('Authorization', `Bearer ${token2}`)
+      .set('X-Band-Id', band2._id.toString())
+      .send({ name: 'Shared Name' });
+
+    expect(res.status).toBe(201);
+  });
+
+  it('rejects renaming a playlist to a name already used in the band (409)', async () => {
+    const { band, token } = await setup();
+
+    await request(app).post('/playlists').set('Authorization', `Bearer ${token}`).set('X-Band-Id', band._id.toString()).send({ name: 'Alpha' });
+    const bRes = await request(app).post('/playlists').set('Authorization', `Bearer ${token}`).set('X-Band-Id', band._id.toString()).send({ name: 'Beta' });
+
+    const rename = await request(app)
+      .patch(`/playlists/${bRes.body._id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('X-Band-Id', band._id.toString())
+      .send({ name: 'Alpha' });
+
+    expect(rename.status).toBe(409);
+    expect(rename.body.error.code).toBe('DUPLICATE_NAME');
+  });
+});
