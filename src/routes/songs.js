@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const PDFDocument = require('pdfkit');
 const Song = require('../models/Song');
 const Genre = require('../models/Genre');
 const Chart = require('../models/Chart');
@@ -279,6 +280,300 @@ router.get('/:id/chart/view', async (req, res, next) => {
       formatting: chart.formatting,
       sections: rendered.sections,
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/* ------------------------------------------------------------------------- *
+ * PDF generation (task 5.1, R9)
+ *
+ * GET /songs/:id/chart/pdf?key=<Numbers|KEY> builds the SAME
+ * Render_Representation as GET /:id/chart/view (reusing renderModel /
+ * numbersToNames) and lays it out as a PDF with pdfkit (pure-JS, Heroku
+ * friendly). Chord tokens are drawn ABOVE the lyric syllable they attach to in
+ * a monospaced font; `formatting.columns` (1 or 2) and `formatting.chordColor`
+ * are honored; `PAGE_BREAK`/`COLUMN_BREAK` directive lines force a new
+ * page/column; a `TRANSPOSE_KEY` directive renders as a small "Transpose +n"
+ * marker. Long content flows onto additional pages. The result streams back as
+ * `application/pdf` with a sanitized attachment filename from the song title.
+ * ------------------------------------------------------------------------- */
+
+// Map a stored formatting.chordColor to something pdfkit's fillColor accepts.
+// Named CSS colors and #rrggbb both work; fall back to blue on anything odd.
+function resolveChordColor(chordColor) {
+  if (typeof chordColor !== 'string' || chordColor.trim() === '') return 'blue';
+  const c = chordColor.trim();
+  // Allow a bare hex (#abc / #aabbcc) or a simple color word.
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c)) return c;
+  if (/^[a-zA-Z]+$/.test(c)) return c;
+  return 'blue';
+}
+
+// Turn a song title into a safe, non-empty PDF filename (no path separators,
+// control chars, or characters that break Content-Disposition).
+function sanitizePdfFilename(title) {
+  const base = (typeof title === 'string' ? title : '').trim() || 'chart';
+  // Replace anything that isn't a safe filename char with an underscore and
+  // collapse runs; strip leading/trailing dots and underscores.
+  const cleaned = base
+    .replace(/[^A-Za-z0-9 ._-]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/_+/g, '_')
+    .replace(/^[._]+|[._]+$/g, '')
+    .trim();
+  return (cleaned || 'chart') + '.pdf';
+}
+
+// Lay a Render_Representation out onto a pdfkit document. Pure drawing: no I/O.
+// The doc is assumed already created; the caller owns piping/ending it.
+function layoutChartPdf(doc, rendered) {
+  const MARGIN = 48;
+  const CHORD_SIZE = 9; // chords slightly smaller, sitting above lyrics
+  const BODY_SIZE = Number(rendered.formatting && rendered.formatting.size) || 11;
+  const LINE_GAP = 4; // extra space between stacked chord/lyric rows
+  const chordColor = resolveChordColor(
+    rendered.formatting && rendered.formatting.chordColor
+  );
+  const columns = rendered.formatting && rendered.formatting.columns === 2 ? 2 : 1;
+
+  const pageWidth = doc.page.width;
+  const pageBottom = doc.page.height - MARGIN;
+  const usableWidth = pageWidth - MARGIN * 2;
+  const COLUMN_GAP = 24;
+  const colWidth =
+    columns === 2 ? (usableWidth - COLUMN_GAP) / 2 : usableWidth;
+
+  // Column cursor state. `col` is the active column index (0-based); `y` is the
+  // current vertical cursor shared across the helpers below.
+  let col = 0;
+  let y = MARGIN;
+
+  const colX = (c) => MARGIN + c * (colWidth + COLUMN_GAP);
+
+  // Monospaced metrics: with Courier, every glyph is the same advance width, so
+  // a chord placed at the pixel offset of its lyric segment sits exactly over
+  // the right syllable.
+  const charWidth = (size) => {
+    doc.font('Courier').fontSize(size);
+    return doc.widthOfString('M'); // monospace: any char works
+  };
+
+  // Start a fresh page and reset the cursor to the first column top.
+  const newPage = () => {
+    doc.addPage();
+    col = 0;
+    y = MARGIN;
+  };
+
+  // Move to the next column, or to a new page if already in the last column.
+  const nextColumn = () => {
+    if (col < columns - 1) {
+      col += 1;
+      y = MARGIN;
+    } else {
+      newPage();
+    }
+  };
+
+  // Ensure `height` px fit before pageBottom; advance column/page if not.
+  const ensureSpace = (height) => {
+    if (y + height > pageBottom) {
+      nextColumn();
+    }
+  };
+
+  // Draw a chord-over-lyric content line. A line is a list of segments, each
+  // `{ chord, lyric }`. We render the lyric text left-to-right in a monospaced
+  // font and place each chord just above the first character of its segment.
+  const drawContentLine = (segments) => {
+    const cw = charWidth(BODY_SIZE);
+    const chordRowH = CHORD_SIZE + 2;
+    const lyricRowH = BODY_SIZE + 2;
+    const anyChord = segments.some((s) => s.chord);
+    const rowH = (anyChord ? chordRowH : 0) + lyricRowH + LINE_GAP;
+
+    ensureSpace(rowH);
+
+    const x0 = colX(col);
+    const lyricY = y + (anyChord ? chordRowH : 0);
+
+    // First pass: lyrics on the lyric row, tracking each segment's start X.
+    let x = x0;
+    const segStartX = [];
+    doc.font('Courier').fontSize(BODY_SIZE).fillColor('black');
+    for (const seg of segments) {
+      segStartX.push(x);
+      const lyric = seg.lyric || '';
+      if (lyric !== '') {
+        doc.text(lyric, x, lyricY, { lineBreak: false });
+      }
+      x += lyric.length * cw;
+    }
+
+    // Second pass: chords on the chord row, above their segment's start X.
+    if (anyChord) {
+      doc.font('Courier-Bold').fontSize(CHORD_SIZE).fillColor(chordColor);
+      segments.forEach((seg, i) => {
+        if (seg.chord) {
+          doc.text(seg.chord, segStartX[i], y, { lineBreak: false });
+        }
+      });
+      doc.fillColor('black');
+    }
+
+    y += rowH;
+  };
+
+  // Draw a blank (stanza) spacer.
+  const drawBlankLine = () => {
+    ensureSpace(BODY_SIZE);
+    y += BODY_SIZE * 0.6;
+  };
+
+  // Draw a section header (label + optional "x<repeat>").
+  const drawSectionHeader = (label, repeat) => {
+    const text = (label || '') + (repeat ? `  x${repeat}` : '');
+    if (text.trim() === '') return;
+    const headerH = BODY_SIZE + 6;
+    ensureSpace(headerH + 2);
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(BODY_SIZE + 1)
+      .fillColor('black')
+      .text(text, colX(col), y, { width: colWidth, lineBreak: false });
+    y += headerH;
+  };
+
+  // Draw a small "Transpose +n" marker for a TRANSPOSE_KEY directive line.
+  const drawTransposeMarker = (shift) => {
+    const sign = shift > 0 ? `+${shift}` : `${shift}`;
+    const markerH = CHORD_SIZE + 6;
+    ensureSpace(markerH);
+    doc
+      .font('Helvetica-Oblique')
+      .fontSize(CHORD_SIZE + 1)
+      .fillColor(chordColor)
+      .text(`Transpose ${sign}`, colX(col), y, { width: colWidth, lineBreak: false });
+    doc.fillColor('black');
+    y += markerH;
+  };
+
+  // --- Header block: title, artist, key label ------------------------------
+  if (rendered.title) {
+    doc.font('Helvetica-Bold').fontSize(18).fillColor('black');
+    doc.text(rendered.title, MARGIN, y, { width: usableWidth });
+    y = doc.y + 2;
+  }
+  if (rendered.artistLabel) {
+    doc.font('Helvetica').fontSize(12).fillColor('black');
+    doc.text(rendered.artistLabel, MARGIN, y, { width: usableWidth });
+    y = doc.y + 2;
+  }
+  doc.font('Helvetica-Oblique').fontSize(10).fillColor('black');
+  doc.text(`Key: ${rendered.keyLabel}`, MARGIN, y, { width: usableWidth });
+  y = doc.y + 10;
+
+  // --- Sections ------------------------------------------------------------
+  for (const section of rendered.sections || []) {
+    drawSectionHeader(section.label, section.repeat);
+
+    for (const line of section.lines || []) {
+      if (line.directive === 'PAGE_BREAK') {
+        newPage();
+        continue;
+      }
+      if (line.directive === 'COLUMN_BREAK') {
+        nextColumn();
+        continue;
+      }
+      if (line.directive === 'TRANSPOSE_KEY') {
+        drawTransposeMarker(line.transposeShift || 0);
+        continue;
+      }
+      // Content line: a blank line has no segments.
+      if (!line.segments || line.segments.length === 0) {
+        drawBlankLine();
+        continue;
+      }
+      drawContentLine(line.segments);
+    }
+
+    // A little breathing room after each section.
+    y += BODY_SIZE * 0.5;
+  }
+}
+
+// GET /songs/:id/chart/pdf — render the chart to a downloadable PDF.
+// Query `key`: omitted or 'Numbers' renders the stored numbers body as-is; a
+// key value transposes numbers -> names in that key (422 KEY_INVALID on a bad
+// key). Band-scoped via the song (R9.5). Streams `application/pdf`.
+router.get('/:id/chart/pdf', async (req, res, next) => {
+  try {
+    const song = await loadScopedSong(req, next);
+    if (!song) return;
+
+    const chart = await Chart.findOne({ song: song._id });
+    if (!chart) {
+      const err = new Error('This song has no chart');
+      err.status = 404;
+      err.code = 'CHART_NOT_FOUND';
+      return next(err);
+    }
+
+    // Resolve the requested representation exactly like GET /:id/chart/view.
+    const requested = typeof req.query.key === 'string' ? req.query.key.trim() : '';
+    const isNumbers = requested === '' || requested === 'Numbers';
+
+    let rendered;
+    let keyLabel;
+    if (isNumbers) {
+      rendered = renderModel(chart.body);
+      keyLabel = 'Numbers';
+    } else {
+      if (!isSupportedKey(requested)) {
+        const err = new Error(
+          `Unsupported or invalid key "${requested}". Supply a supported major key or "Numbers".`
+        );
+        err.status = 422;
+        err.code = 'KEY_INVALID';
+        err.fields = { key: 'unsupported or invalid key' };
+        return next(err);
+      }
+      rendered = renderModel(numbersToNames(chart.body, requested));
+      keyLabel = requested;
+    }
+
+    // Assemble the full Render_Representation (metadata + sections) the layout
+    // consumes, matching the shape returned by GET /:id/chart/view.
+    const representation = {
+      title: chart.title,
+      artistLabel: chart.artistLabel,
+      keyLabel,
+      formatting: chart.formatting,
+      sections: rendered.sections,
+    };
+
+    // Stream the PDF. Set headers before piping; pdfkit writes incrementally.
+    const filename = sanitizePdfFilename(chart.title || song.title);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const doc = new PDFDocument({ size: 'A4', margin: 48, autoFirstPage: true });
+    // If the document errors mid-stream, surface it (headers may already be
+    // sent, in which case we can only abort the response).
+    doc.on('error', (streamErr) => {
+      if (!res.headersSent) {
+        next(streamErr);
+      } else {
+        res.destroy(streamErr);
+      }
+    });
+    doc.pipe(res);
+
+    layoutChartPdf(doc, representation);
+
+    doc.end();
   } catch (err) {
     next(err);
   }
