@@ -383,25 +383,79 @@ function layoutChartPdf(doc, representation) {
   const colX = (c) => MARGIN + c * (colWidth + COLUMN_GAP);
   const charWidth = (size) => { doc.font('Courier').fontSize(size); return doc.widthOfString('M'); };
 
+  // Monospaced advance widths at the chord sizes we draw.
+  const SUP_SIZE = Math.max(6, Math.round(CHORD_SIZE * 0.7)); // superscript quality
+  const chordCW = (() => { doc.font('Courier-Bold').fontSize(CHORD_SIZE); return doc.widthOfString('M'); })();
+  const supCW = (() => { doc.font('Courier-Bold').fontSize(SUP_SIZE); return doc.widthOfString('M'); })();
+
+  // The display parts of a segment's chord. Segments now carry parsed
+  // root/quality/bass; fall back to the raw chord string for verbatim tokens.
+  const chordDisplay = (seg) => {
+    if (!seg.chord) return null;
+    const root = seg.root != null ? seg.root : seg.chord;
+    const quality = seg.quality || '';
+    const bass = seg.bass || null;
+    return { root, quality, bass };
+  };
+
+  // Drawn width of a chord: root + superscript quality + optional /bass, all
+  // monospaced. Used to space chord-only lines so wide chords don't collide.
+  const chordWidth = (parts) => {
+    if (!parts) return 0;
+    let w = parts.root.length * chordCW;
+    if (parts.quality) w += parts.quality.length * supCW;
+    if (parts.bass) w += (1 + parts.bass.length) * chordCW; // "/" + bass
+    return w;
+  };
+
+  // Draw a chord at (x, y): root at CHORD_SIZE, quality SUPERSCRIPTED (smaller,
+  // raised), then optional /bass. Returns the x advanced past what was drawn.
+  const drawChord = (parts, x, y) => {
+    doc.fillColor(chordColor);
+    let cx = x;
+    doc.font('Courier-Bold').fontSize(CHORD_SIZE).text(parts.root, cx, y, { lineBreak: false });
+    cx += parts.root.length * chordCW;
+    if (parts.quality) {
+      // Raise the superscript: top-align it near the top of the root glyph.
+      const supY = y - SUP_SIZE * 0.35;
+      doc.font('Courier-Bold').fontSize(SUP_SIZE).text(parts.quality, cx, supY, { lineBreak: false });
+      cx += parts.quality.length * supCW;
+    }
+    if (parts.bass) {
+      doc.font('Courier-Bold').fontSize(CHORD_SIZE).text('/' + parts.bass, cx, y, { lineBreak: false });
+      cx += (1 + parts.bass.length) * chordCW;
+    }
+    doc.fillColor('black');
+    return cx;
+  };
+
   const drawContentLine = (segments, x0, y) => {
     const cw = charWidth(BODY_SIZE);
     const anyChord = segments.some((s) => s.chord);
     const chordRowH = anyChord ? CHORD_SIZE + 2 : 0;
     const lyricY = y + chordRowH;
+
+    // Walk segments left-to-right. Each segment advances x by the GREATER of
+    // its lyric width and its chord width (+ one space of gap) so a chord that
+    // is wider than its lyric — e.g. a chord-only INTRO line — pushes the next
+    // segment over instead of overlapping it.
     let x = x0;
-    const segStartX = [];
-    doc.font('Courier').fontSize(BODY_SIZE).fillColor('black');
     for (const seg of segments) {
-      segStartX.push(x);
       const lyric = seg.lyric || '';
-      if (lyric !== '') doc.text(lyric, x, lyricY, { lineBreak: false });
-      x += lyric.length * cw;
+      const parts = chordDisplay(seg);
+
+      // Lyric on the lyric row.
+      if (lyric !== '') {
+        doc.font('Courier').fontSize(BODY_SIZE).fillColor('black').text(lyric, x, lyricY, { lineBreak: false });
+      }
+      // Chord (with superscript quality) on the chord row.
+      if (parts) drawChord(parts, x, y);
+
+      const lyricW = lyric.length * cw;
+      const chW = parts ? chordWidth(parts) + chordCW : 0; // + one space gap
+      x += Math.max(lyricW, chW);
     }
-    if (anyChord) {
-      doc.font('Courier-Bold').fontSize(CHORD_SIZE).fillColor(chordColor);
-      segments.forEach((seg, i) => { if (seg.chord) doc.text(seg.chord, segStartX[i], y, { lineBreak: false }); });
-      doc.fillColor('black');
-    }
+
     return chordRowH + BODY_SIZE + 2 + LINE_GAP;
   };
 
