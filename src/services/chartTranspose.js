@@ -648,6 +648,27 @@ const SECTION_HEADER_RE = /^[A-Z][A-Z0-9 \-]*?(?:\s*X(\d+))?$/;
  * @param {string} line  A single content line (no trailing EOL).
  * @returns {RenderSegment[]}
  */
+// Break a chord token into display parts { root, quality, bass } so the UI can
+// render the ROOT (degree or note name) at normal size and SUPERSCRIPT the
+// quality/extension (e.g. the "5" in "D5", the "maj7" in "1maj7") — on a number
+// chart "45" is ambiguous, so the quality must be visually distinct. Uses the
+// shared parseChord; a token that doesn't parse is treated as an opaque root
+// with no quality (so verbatim/unparseable tokens still render as-is).
+function chordParts(token) {
+  if (token == null) return null;
+  try {
+    const p = parseChord(token);
+    const root = (p.mode === 'numbers' ? p.accidental + p.root : p.root + p.accidental);
+    const bass = p.bass
+      ? (p.mode === 'numbers' ? p.bass.accidental + p.bass.root : p.bass.root + p.bass.accidental)
+      : null;
+    return { root, quality: p.quality || '', bass };
+  } catch (e) {
+    // Unparseable (e.g. a verbatim passthrough token): show it as-is.
+    return { root: token, quality: '', bass: null };
+  }
+}
+
 function segmentLine(line) {
   // Collect every inline [chord] with its position so we can slice the lyric
   // span that follows each one.
@@ -676,7 +697,7 @@ function segmentLine(line) {
     const current = chordMatches[i];
     const lyricEnd =
       i + 1 < chordMatches.length ? chordMatches[i + 1].start : line.length;
-    segments.push({ chord: current.chord, lyric: line.slice(current.end, lyricEnd) });
+    segments.push({ chord: current.chord, ...chordParts(current.chord), lyric: line.slice(current.end, lyricEnd) });
   }
 
   return segments;

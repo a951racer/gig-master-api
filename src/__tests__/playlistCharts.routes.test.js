@@ -175,7 +175,7 @@ describe('GET /playlists/:id/charts — charted + un-charted songs (R10.1, R10.3
     expect(first.chart.keyLabel).toBe('Numbers');
     expect(Array.isArray(first.chart.sections)).toBe(true);
     expect(first.chart.sections[0].label).toBe('VERSE 1');
-    expect(first.chart.sections[0].lines[0].segments).toEqual([
+    expect(first.chart.sections[0].lines[0].segments).toMatchObject([
       { chord: '1', lyric: 'Almost ' },
       { chord: '4', lyric: 'heaven' },
     ]);
@@ -183,7 +183,7 @@ describe('GET /playlists/:id/charts — charted + un-charted songs (R10.1, R10.3
     const third = charts[2];
     expect(third.chart).not.toBeNull();
     expect(third.chart.sections[0].label).toBe('CHORUS');
-    expect(third.chart.sections[0].lines[0].segments).toEqual([
+    expect(third.chart.sections[0].lines[0].segments).toMatchObject([
       { chord: '5', lyric: 'West ' },
       { chord: '1', lyric: 'Virginia' },
     ]);
@@ -225,7 +225,7 @@ describe('GET /playlists/:id/charts — key honored (R10.2)', () => {
     expect(res.status).toBe(200);
     const chart = res.body.charts[0].chart;
     expect(chart.keyLabel).toBe('Numbers');
-    expect(chart.sections[0].lines[0].segments).toEqual([
+    expect(chart.sections[0].lines[0].segments).toMatchObject([
       { chord: '1', lyric: 'Hi ' },
       { chord: '4', lyric: 'there' },
     ]);
@@ -243,7 +243,7 @@ describe('GET /playlists/:id/charts — key honored (R10.2)', () => {
     expect(res.status).toBe(200);
     const chart = res.body.charts[0].chart;
     expect(chart.keyLabel).toBe('G');
-    expect(chart.sections[0].lines[0].segments).toEqual([
+    expect(chart.sections[0].lines[0].segments).toMatchObject([
       { chord: 'G', lyric: 'Hi ' },
       { chord: 'C', lyric: 'there' },
     ]);

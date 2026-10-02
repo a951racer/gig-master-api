@@ -132,7 +132,7 @@ describe('GET /songs/:id/chart/view', () => {
 
     const segments = section.lines[0].segments;
     // Property 7: the chord segments are the STORED number tokens, unchanged.
-    expect(segments).toEqual([
+    expect(segments).toMatchObject([
       { chord: '1', lyric: 'Hi ' },
       { chord: '4', lyric: 'there' },
     ]);
@@ -207,7 +207,7 @@ describe('GET /songs/:id/chart/view', () => {
     expect(res.body.keyLabel).toBe('G');
 
     const segments = res.body.sections[0].lines[0].segments;
-    expect(segments).toEqual([
+    expect(segments).toMatchObject([
       { chord: 'G', lyric: 'Hi ' },
       { chord: 'C', lyric: 'there' },
     ]);
@@ -281,7 +281,7 @@ describe('POST /songs/:id/chart/view — un-persisted preview', () => {
     expect(res.body.keyLabel).toBe('Numbers');
     // [G] interpreted in key G is degree 1, rendered as numbers.
     const segments = res.body.sections[0].lines[0].segments;
-    expect(segments).toEqual([{ chord: '1', lyric: 'Hi' }]);
+    expect(segments).toMatchObject([{ chord: '1', lyric: 'Hi' }]);
 
     // Nothing was persisted: a GET of the stored chart must still 404.
     const getChart = await auth(
@@ -313,7 +313,7 @@ describe('POST /songs/:id/chart/view — un-persisted preview', () => {
     expect(res.status).toBe(200);
     expect(res.body.keyLabel).toBe('D');
     const segments = res.body.sections[0].lines[0].segments;
-    expect(segments).toEqual([{ chord: 'D', lyric: 'Hi' }]);
+    expect(segments).toMatchObject([{ chord: 'D', lyric: 'Hi' }]);
   });
 
   it('LENIENTLY renders a mix of valid and unparseable tokens — valid ones convert, bad ones stay verbatim', async () => {
