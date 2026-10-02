@@ -153,6 +153,9 @@ describe('GET /songs/:id/chart/view', () => {
     // Title/artist come from the Song (createSong defaults), NOT the chart.
     expect(res.body.title).toBe('Test Song');
     expect(res.body.artist).toBe('Test Artist');
+    // Band name is derived from the current band (for the footer).
+    expect(typeof res.body.bandName).toBe('string');
+    expect(res.body.bandName.length).toBeGreaterThan(0);
     // The chart carries no title/artistLabel of its own.
     expect(res.body.artistLabel).toBeUndefined();
 

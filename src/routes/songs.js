@@ -224,13 +224,14 @@ function serializeChart(chart) {
 // simple consumers / back-compat) and the paginated `pages` (virtual
 // 8.5x11 layout honoring formatting.columns + COLUMN_BREAK/PAGE_BREAK), so the
 // web viewer and PDF render identical breaks.
-function buildRepresentation(song, chart, numbersOrNamesBody, keyLabel) {
+function buildRepresentation(song, chart, numbersOrNamesBody, keyLabel, bandName) {
   const rendered = renderModel(numbersOrNamesBody);
   const formatting = chart.formatting;
   const { pages } = paginate(rendered, { formatting });
   return {
     title: song.title,
     artist: song.artist,
+    bandName: bandName || '',
     keyLabel,
     formatting,
     sections: rendered.sections,
@@ -305,7 +306,7 @@ router.get('/:id/chart/view', async (req, res, next) => {
     const keyed = resolveKeyedBody(chart, req, next);
     if (!keyed) return;
 
-    res.json(buildRepresentation(song, chart, keyed.body, keyed.keyLabel));
+    res.json(buildRepresentation(song, chart, keyed.body, keyed.keyLabel, req.currentBandName));
   } catch (err) {
     next(err);
   }
@@ -368,14 +369,31 @@ function drawHeader(doc, representation, pageIndex, geom) {
       .text(titleText, MARGIN + 12, bannerTop + 8, { width: usableWidth - 24, lineBreak: false });
     if (representation.artist) {
       doc.font('Helvetica-Bold').fontSize(10)
-        .text(`[${representation.artist}]`, MARGIN + 12, bannerTop + 34, { width: usableWidth - 24, lineBreak: false });
+        .text(representation.artist, MARGIN + 12, bannerTop + 34, { width: usableWidth - 24, lineBreak: false });
     }
     return bannerTop + bannerH + 12;
   }
-  // Condensed header on subsequent pages.
-  doc.fillColor('black').font('Helvetica-Bold').fontSize(11)
-    .text(titleText, MARGIN, MARGIN, { width: usableWidth, lineBreak: false });
+  // Condensed header on subsequent pages: title on the left, page number
+  // right-justified on the same baseline.
+  doc.fillColor('black').font('Helvetica-Bold').fontSize(11);
+  doc.text(titleText, MARGIN, MARGIN, { width: usableWidth, lineBreak: false });
+  const totalPages = (representation.pages && representation.pages.length) || 1;
+  doc.font('Helvetica').fontSize(10).fillColor('#555555')
+    .text(`Page ${pageIndex + 1} of ${totalPages}`, MARGIN, MARGIN, { width: usableWidth, align: 'right', lineBreak: false });
+  doc.fillColor('black');
   return MARGIN + 22;
+}
+
+// Draw a centered footer (the band name) in the bottom page margin — same on
+// every page. Lives inside the margin so it does not affect content height.
+function drawFooter(doc, representation, geom) {
+  const bandName = representation.bandName;
+  if (!bandName) return;
+  const { MARGIN, usableWidth } = geom;
+  const footerY = doc.page.height - 30; // within the ~48pt bottom margin
+  doc.font('Helvetica').fontSize(9).fillColor('#777777')
+    .text(bandName, MARGIN, footerY, { width: usableWidth, align: 'center', lineBreak: false });
+  doc.fillColor('black');
 }
 
 // Lay a paginated representation out onto a pdfkit Letter document.
@@ -493,6 +511,7 @@ function layoutChartPdf(doc, representation) {
   pages.forEach((page, pageIndex) => {
     if (pageIndex > 0) doc.addPage();
     const contentTop = drawHeader(doc, representation, pageIndex, geom);
+    drawFooter(doc, representation, geom);
 
     (page.columns || []).forEach((column, c) => {
       let y = contentTop;
@@ -541,7 +560,7 @@ router.get('/:id/chart/pdf', async (req, res, next) => {
     const keyed = resolveKeyedBody(chart, req, next);
     if (!keyed) return;
 
-    const representation = buildRepresentation(song, chart, keyed.body, keyed.keyLabel);
+    const representation = buildRepresentation(song, chart, keyed.body, keyed.keyLabel, req.currentBandName);
 
     const filename = sanitizePdfFilename(song.title);
     res.setHeader('Content-Type', 'application/pdf');
@@ -631,6 +650,7 @@ router.post('/:id/chart/view', async (req, res, next) => {
     res.json({
       title: song.title,
       artist: song.artist,
+      bandName: req.currentBandName || '',
       keyLabel,
       formatting: fmt,
       sections: rendered.sections,
