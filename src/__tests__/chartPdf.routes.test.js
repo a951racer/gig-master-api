@@ -123,6 +123,35 @@ function expectPdf(res) {
 }
 
 describe('GET /songs/:id/chart/pdf — valid PDF (R9.1)', () => {
+  it('renders chord-only lines and quality/slash chords without error (superscript + spacing)', async () => {
+    // Seed a charted song, then overwrite its chart with a body that has a
+    // chord-only INTRO (chords wider than their lyric) plus qualities (5,
+    // maj7) and a slash chord — exercising the superscript-quality +
+    // chord-aware spacing layout paths.
+    const { token, band, song } = await seedChartedSong('pdf-sup@example.com');
+
+    const put = await authed(
+      request(app).put(`/songs/${song._id}/chart`),
+      token,
+      band._id
+    ).send({
+      enteredKey: 'Numbers',
+      body: "INTRO\n[1] [b35] [45]\nVERSE\n[5]I'm through with [1maj7]love [5/7]now",
+      formatting: { font: 'monospace', size: 11, chordColor: 'blue', columns: 1 },
+    });
+    expect(put.status).toBe(200);
+
+    const res = await authed(
+      request(app).get(`/songs/${song._id}/chart/pdf?key=Numbers`),
+      token,
+      band._id
+    ).buffer(true);
+
+    // A valid, non-empty PDF is produced (the layout handled chord-only lines,
+    // superscript qualities and a slash chord without throwing).
+    expectPdf(res);
+  });
+
   it('returns a PDF for key=Numbers (content-type application/pdf, body begins with %PDF)', async () => {
     const { token, band, song } = await seedChartedSong();
 
