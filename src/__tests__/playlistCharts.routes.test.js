@@ -141,7 +141,7 @@ describe('GET /playlists/:id/charts — charted + un-charted songs (R10.1, R10.3
     const playlist = await Playlist.create({
       band: band._id,
       name: 'Set List',
-      songs: [charted1._id, unCharted._id, charted2._id],
+      songs: [{ song: charted1._id }, { song: unCharted._id }, { song: charted2._id }],
     });
 
     const res = await authed(
@@ -208,7 +208,7 @@ describe('GET /playlists/:id/charts — key honored (R10.2)', () => {
     const playlist = await Playlist.create({
       band: band._id,
       name: 'Key Set',
-      songs: [song._id],
+      songs: [{ song: song._id }],
     });
     return { band, token, playlist };
   }
@@ -287,7 +287,7 @@ describe('GET /playlists/:id/charts — band-scoped authorization (R10.4)', () =
     const playlistInA = await Playlist.create({
       band: bandA._id,
       name: 'A Set',
-      songs: [songInA._id],
+      songs: [{ song: songInA._id }],
     });
 
     const res = await authed(
@@ -300,3 +300,56 @@ describe('GET /playlists/:id/charts — band-scoped authorization (R10.4)', () =
     expect(res.body.error.code).toBe('NOT_FOUND');
   });
 });
+
+describe('GET /playlists/:id/charts — per-song playedKey default (#72)', () => {
+  it('with NO key param, each song renders in its playlist playedKey (falling back to Numbers)', async () => {
+    const { band, token } = await setupBandWithMember('-pk');
+    const keyed = await createSong(band, { title: 'Keyed' });
+    const plain = await createSong(band, { title: 'Plain' });
+    // Both stored canonically as numbers: 1 and 4.
+    await putChart(token, band._id, keyed._id, { enteredKey: 'Numbers', body: '[1]Hi [4]there' });
+    await putChart(token, band._id, plain._id, { enteredKey: 'Numbers', body: '[1]Hi [4]there' });
+
+    const playlist = await Playlist.create({
+      band: band._id,
+      name: 'PK Set',
+      songs: [
+        { song: keyed._id, playedKey: 'G' }, // → render names in G
+        { song: plain._id },                 // no key → Numbers
+      ],
+    });
+
+    // No key param → per-song playedKey default.
+    const res = await authed(request(app).get(`/playlists/${playlist._id}/charts`), token, band._id);
+    expect(res.status).toBe(200);
+
+    const keyedChart = res.body.charts[0];
+    expect(keyedChart.playedKey).toBe('G');
+    expect(keyedChart.chart.keyLabel).toBe('G');
+    // 1→G, 4→C in key G.
+    expect(keyedChart.chart.sections[0].lines[0].segments.map((s) => s.chord)).toEqual(['G', 'C']);
+
+    const plainChart = res.body.charts[1];
+    expect(plainChart.playedKey).toBe('');
+    expect(plainChart.chart.keyLabel).toBe('Numbers');
+    expect(plainChart.chart.sections[0].lines[0].segments.map((s) => s.chord)).toEqual(['1', '4']);
+  });
+
+  it('an explicit key param overrides each song\'s playedKey', async () => {
+    const { band, token } = await setupBandWithMember('-pk2');
+    const song = await createSong(band, { title: 'Keyed' });
+    await putChart(token, band._id, song._id, { enteredKey: 'Numbers', body: '[1]Hi [4]there' });
+    const playlist = await Playlist.create({
+      band: band._id,
+      name: 'PK Override',
+      songs: [{ song: song._id, playedKey: 'G' }],
+    });
+
+    // Explicit ?key=D should win over the song's playedKey (G).
+    const res = await authed(request(app).get(`/playlists/${playlist._id}/charts?key=D`), token, band._id);
+    expect(res.status).toBe(200);
+    expect(res.body.charts[0].chart.keyLabel).toBe('D');
+    // 1→D, 4→G in key D.
+    expect(res.body.charts[0].chart.sections[0].lines[0].segments.map((s) => s.chord)).toEqual(['D', 'G']);
+  });
+})
