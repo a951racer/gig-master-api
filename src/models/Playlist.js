@@ -16,8 +16,20 @@ const playlistSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    // Each entry is the song↔playlist relationship: the song plus the key it's
+    // PLAYED in for THIS playlist (a song may have a different played key in
+    // another playlist). `playedKey` is one of the 12 supported major keys or
+    // '' (unset). It is NOT "Numbers" — that's a display mode, not a key.
     songs: {
-      type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Song' }],
+      type: [
+        new mongoose.Schema(
+          {
+            song: { type: mongoose.Schema.Types.ObjectId, ref: 'Song', required: true },
+            playedKey: { type: String, default: '' },
+          },
+          { _id: false }
+        ),
+      ],
       default: [],
     },
   },

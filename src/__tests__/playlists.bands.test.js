@@ -73,7 +73,7 @@ describe('POST /playlists with songs[] (copy support)', () => {
     expect(res.status).toBe(201);
     expect(res.body.name).toBe('Copy of Set');
     expect(res.body.description).toBe('copied');
-    expect(res.body.songs.map(String)).toEqual(order);
+    expect(res.body.songs.map((e) => String(e.song))).toEqual(order);
   });
 
   it('still creates an empty playlist when songs is omitted (back-compat)', async () => {
@@ -100,7 +100,7 @@ describe('POST /playlists with songs[] (copy support)', () => {
       .send({ name: 'Deduped', songs: [a, b, a, b, a] });
 
     expect(res.status).toBe(201);
-    expect(res.body.songs.map(String)).toEqual([a, b]);
+    expect(res.body.songs.map((e) => String(e.song))).toEqual([a, b]);
   });
 
   it('rejects songs from another band with 422', async () => {
@@ -215,3 +215,143 @@ describe('Playlist name uniqueness within a band', () => {
     expect(rename.body.error.code).toBe('DUPLICATE_NAME');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Played Key — per-(song↔playlist) attribute. songs is now a subdocument array
+// [{ song, playedKey }]; playedKey must be a supported MAJOR key or '' (not
+// "Numbers"). (#72)
+// ---------------------------------------------------------------------------
+describe('Played Key on playlist songs (#72)', () => {
+  const authed = (req, token, bandId) =>
+    req.set('Authorization', `Bearer ${token}`).set('X-Band-Id', bandId.toString());
+
+  it('POST accepts { song, playedKey } entries and validates the key', async () => {
+    const { band, token, songs } = await setup();
+    const res = await authed(request(app).post('/playlists'), token, band._id).send({
+      name: 'Keyed Set',
+      songs: [
+        { song: songs[0]._id.toString(), playedKey: 'G' },
+        { song: songs[1]._id.toString() }, // no key → ''
+      ],
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.songs).toHaveLength(2);
+    expect(res.body.songs[0]).toMatchObject({ song: songs[0]._id.toString(), playedKey: 'G' });
+    expect(res.body.songs[1]).toMatchObject({ song: songs[1]._id.toString(), playedKey: '' });
+  });
+
+  it('POST accepts a mix of bare ids and { song, playedKey } objects', async () => {
+    const { band, token, songs } = await setup();
+    const res = await authed(request(app).post('/playlists'), token, band._id).send({
+      name: 'Mixed',
+      songs: [songs[0]._id.toString(), { song: songs[1]._id.toString(), playedKey: 'Bb' }],
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.songs[0].playedKey).toBe('');
+    expect(res.body.songs[1].playedKey).toBe('Bb');
+  });
+
+  it('POST rejects an unsupported playedKey (incl. "Numbers") with 422 KEY_INVALID', async () => {
+    const { band, token, songs } = await setup();
+    for (const bad of ['Numbers', 'H', 'Am']) {
+      const res = await authed(request(app).post('/playlists'), token, band._id).send({
+        name: `Bad ${bad}`,
+        songs: [{ song: songs[0]._id.toString(), playedKey: bad }],
+      });
+      expect(res.status).toBe(422);
+      expect(res.body.error.code).toBe('KEY_INVALID');
+    }
+  });
+
+  it('PATCH /playlists/:id/songs/:songId sets a song\'s played key', async () => {
+    const { band, token, songs } = await setup();
+    const created = await authed(request(app).post('/playlists'), token, band._id)
+      .send({ name: 'Set', songs: [songs[0]._id.toString()] });
+    const plId = created.body._id;
+
+    const res = await authed(
+      request(app).patch(`/playlists/${plId}/songs/${songs[0]._id}`), token, band._id
+    ).send({ playedKey: 'D' });
+    expect(res.status).toBe(200);
+    expect(res.body.songs[0]).toMatchObject({ song: songs[0]._id.toString(), playedKey: 'D' });
+
+    // Clearing with '' is allowed.
+    const cleared = await authed(
+      request(app).patch(`/playlists/${plId}/songs/${songs[0]._id}`), token, band._id
+    ).send({ playedKey: '' });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.songs[0].playedKey).toBe('');
+  });
+
+  it('PATCH rejects an invalid key and 404s for a song not in the playlist', async () => {
+    const { band, token, songs } = await setup();
+    const created = await authed(request(app).post('/playlists'), token, band._id)
+      .send({ name: 'Set', songs: [songs[0]._id.toString()] });
+    const plId = created.body._id;
+
+    const bad = await authed(
+      request(app).patch(`/playlists/${plId}/songs/${songs[0]._id}`), token, band._id
+    ).send({ playedKey: 'Numbers' });
+    expect(bad.status).toBe(422);
+    expect(bad.body.error.code).toBe('KEY_INVALID');
+
+    const missing = await authed(
+      request(app).patch(`/playlists/${plId}/songs/${songs[1]._id}`), token, band._id
+    ).send({ playedKey: 'G' });
+    expect(missing.status).toBe(404);
+  });
+
+  it('POST /playlists/:id/songs adds a song with an optional playedKey (idempotent)', async () => {
+    const { band, token, songs } = await setup();
+    const created = await authed(request(app).post('/playlists'), token, band._id)
+      .send({ name: 'Set' });
+    const plId = created.body._id;
+
+    const add = await authed(request(app).post(`/playlists/${plId}/songs`), token, band._id)
+      .send({ songId: songs[0]._id.toString(), playedKey: 'A' });
+    expect(add.status).toBe(200);
+    expect(add.body.songs).toHaveLength(1);
+    expect(add.body.songs[0]).toMatchObject({ song: songs[0]._id.toString(), playedKey: 'A' });
+
+    // Adding the same song again updates its key rather than duplicating.
+    const again = await authed(request(app).post(`/playlists/${plId}/songs`), token, band._id)
+      .send({ songId: songs[0]._id.toString(), playedKey: 'E' });
+    expect(again.status).toBe(200);
+    expect(again.body.songs).toHaveLength(1);
+    expect(again.body.songs[0].playedKey).toBe('E');
+  });
+
+  it('reorder preserves each song\'s playedKey', async () => {
+    const { band, token, songs } = await setup();
+    const created = await authed(request(app).post('/playlists'), token, band._id).send({
+      name: 'Set',
+      songs: [
+        { song: songs[0]._id.toString(), playedKey: 'C' },
+        { song: songs[1]._id.toString(), playedKey: 'G' },
+      ],
+    });
+    const plId = created.body._id;
+
+    const reorder = await authed(request(app).put(`/playlists/${plId}/songs`), token, band._id)
+      .send({ songs: [songs[1]._id.toString(), songs[0]._id.toString()] });
+    expect(reorder.status).toBe(200);
+    expect(reorder.body.songs.map((e) => [String(e.song), e.playedKey])).toEqual([
+      [songs[1]._id.toString(), 'G'],
+      [songs[0]._id.toString(), 'C'],
+    ]);
+  });
+
+  it('DELETE /playlists/:id/songs/:songId removes the entry by song', async () => {
+    const { band, token, songs } = await setup();
+    const created = await authed(request(app).post('/playlists'), token, band._id)
+      .send({ name: 'Set', songs: [songs[0]._id.toString(), songs[1]._id.toString()] });
+    const plId = created.body._id;
+
+    const del = await authed(request(app).delete(`/playlists/${plId}/songs/${songs[0]._id}`), token, band._id);
+    expect(del.status).toBe(200);
+
+    const detail = await authed(request(app).get(`/playlists/${plId}`), token, band._id);
+    expect(detail.body.songs).toHaveLength(1);
+    expect(String(detail.body.songs[0].song._id)).toBe(songs[1]._id.toString());
+  });
+})

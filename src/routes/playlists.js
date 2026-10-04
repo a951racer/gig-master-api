@@ -32,6 +32,56 @@ function duplicateNameError() {
   return err;
 }
 
+// Validate a playedKey value: it must be empty ('' / unset = no played key) or
+// one of the 12 supported MAJOR keys. "Numbers" is a display mode, not a key,
+// so it is NOT accepted here. Returns the normalized value ('' or the key), or
+// throws a 422 KEY_INVALID-style error for the caller to forward.
+function normalizePlayedKey(value, field = 'playedKey') {
+  if (value === undefined || value === null || value === '') return '';
+  const v = String(value).trim();
+  if (v === '') return '';
+  if (!isSupportedKey(v)) {
+    const err = new Error(
+      `Invalid playedKey "${v}". Supply one of the 12 supported major keys, or leave it empty.`
+    );
+    err.status = 422;
+    err.code = 'KEY_INVALID';
+    err.fields = { [field]: 'unsupported or invalid key' };
+    throw err;
+  }
+  return v;
+}
+
+// Normalize a single `songs` input entry into { song, playedKey }. Each entry
+// may be a bare song id (string) or an object { song, playedKey }. We treat it
+// as the object form only when it's a plain object carrying a `song` key;
+// anything else is taken as a bare id. Throws 422 on a malformed entry or an
+// invalid playedKey.
+function isObjectEntry(entry) {
+  return (
+    entry !== null &&
+    typeof entry === 'object' &&
+    !Array.isArray(entry) &&
+    Object.prototype.hasOwnProperty.call(entry, 'song')
+  );
+}
+
+function normalizeSongEntry(entry) {
+  if (isObjectEntry(entry)) {
+    const songId = entry.song;
+    if (songId === undefined || songId === null || songId === '') {
+      const err = new Error('Each song entry must have a song id');
+      err.status = 422;
+      err.code = 'VALIDATION_ERROR';
+      err.fields = { songs: 'entry missing song id' };
+      throw err;
+    }
+    return { song: songId, playedKey: normalizePlayedKey(entry.playedKey) };
+  }
+  // Bare id form.
+  return { song: entry, playedKey: '' };
+}
+
 router.use(authenticate);
 router.use(bandScope);
 
@@ -64,35 +114,44 @@ router.post('/', async (req, res, next) => {
       return next(err);
     }
 
-    let songIds = [];
+    let songEntries = [];
     if (songs !== undefined) {
       if (!Array.isArray(songs)) {
-        const err = new Error('songs must be an array of song ids');
+        const err = new Error('songs must be an array of song ids or { song, playedKey } objects');
         err.status = 422;
         err.code = 'VALIDATION_ERROR';
         err.fields = { songs: 'must be an array' };
         return next(err);
       }
 
-      // Dedupe while preserving the first-seen order.
+      // Normalize each entry (id OR { song, playedKey }) and validate playedKey.
+      let normalized;
+      try {
+        normalized = songs.map(normalizeSongEntry);
+      } catch (e) {
+        return next(e);
+      }
+
+      // Dedupe by song id, preserving first-seen order (keeps that entry's key).
       const seen = new Set();
       const ordered = [];
-      for (const id of songs) {
-        const key = String(id);
+      for (const entry of normalized) {
+        const key = String(entry.song);
         if (!seen.has(key)) {
           seen.add(key);
-          ordered.push(id);
+          ordered.push(entry);
         }
       }
 
       if (ordered.length > 0) {
         // Every song must belong to the current band.
+        const ids = ordered.map((e) => e.song);
         const found = await Song.find(
-          { _id: { $in: ordered }, band: req.currentBand },
+          { _id: { $in: ids }, band: req.currentBand },
           { _id: 1 }
         );
         const foundSet = new Set(found.map((d) => d._id.toString()));
-        const invalid = ordered.filter((id) => !foundSet.has(String(id)));
+        const invalid = ordered.filter((e) => !foundSet.has(String(e.song)));
         if (invalid.length > 0) {
           const err = new Error('One or more songs do not belong to the current band');
           err.status = 422;
@@ -102,10 +161,10 @@ router.post('/', async (req, res, next) => {
         }
       }
 
-      songIds = ordered;
+      songEntries = ordered;
     }
 
-    const playlist = new Playlist({ band: req.currentBand, name, description, songs: songIds });
+    const playlist = new Playlist({ band: req.currentBand, name, description, songs: songEntries });
     try {
       await playlist.save();
     } catch (err) {
@@ -122,7 +181,7 @@ router.post('/', async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand }).populate({
-      path: 'songs',
+      path: 'songs.song',
       populate: { path: 'genre', select: '_id name slug' },
     });
     if (!playlist) {
@@ -184,11 +243,16 @@ router.get('/:id/charts', async (req, res, next) => {
       err.fields = { key: 'unsupported or invalid key' };
       return next(err);
     }
-    const keyLabel = isNumbers ? 'Numbers' : requested;
+    // Whether the caller explicitly asked for a key. When they did NOT, each
+    // song falls back to its own `playedKey` for THIS playlist (if set),
+    // otherwise Numbers.
+    const keyExplicit = requested !== '';
 
-    // Apply the size cap, preserving playlist order.
+    // Apply the size cap, preserving playlist order. Entries are now
+    // { song, playedKey } subdocuments.
     const truncated = playlist.songs.length > MAX_BATCH;
-    const songIds = playlist.songs.slice(0, MAX_BATCH);
+    const entries = playlist.songs.slice(0, MAX_BATCH);
+    const songIds = entries.map((e) => e.song);
 
     // Load the songs (band-scoped) and their charts, then assemble in playlist
     // order. Both lookups are keyed by id so we can map back to the order.
@@ -199,22 +263,36 @@ router.get('/:id/charts', async (req, res, next) => {
     const songById = new Map(songs.map((s) => [s._id.toString(), s]));
     const chartBySong = new Map(charts.map((c) => [c.song.toString(), c]));
 
-    const result = songIds.map((songId) => {
-      const key = songId.toString();
+    const result = entries.map((entry) => {
+      const key = String(entry.song);
       const song = songById.get(key);
       const chartDoc = chartBySong.get(key);
 
+      // Resolve the render key for THIS song: an explicit request key wins;
+      // otherwise use the song's playedKey for this playlist; otherwise Numbers.
+      let songKey; // '' or 'Numbers' => numbers; else a supported major key
+      if (keyExplicit) {
+        songKey = requested;
+      } else if (entry.playedKey && isSupportedKey(entry.playedKey)) {
+        songKey = entry.playedKey;
+      } else {
+        songKey = '';
+      }
+      const songIsNumbers = songKey === '' || songKey === 'Numbers';
+      const songKeyLabel = songIsNumbers ? 'Numbers' : songKey;
+
       let chart = null;
       if (chartDoc) {
-        const rendered = isNumbers
+        const rendered = songIsNumbers
           ? renderModel(chartDoc.body)
-          : renderModel(numbersToNames(chartDoc.body, requested, { lenient: true }));
+          : renderModel(numbersToNames(chartDoc.body, songKey, { lenient: true }));
         const { pages } = paginate(rendered, { formatting: chartDoc.formatting });
         chart = {
           // Title/artist are song properties, not chart-overridable.
           title: song ? song.title : '',
           artist: song ? song.artist : '',
-          keyLabel,
+          keyLabel: songKeyLabel,
+          playedKey: entry.playedKey || '',
           formatting: chartDoc.formatting,
           sections: rendered.sections,
           pages,
@@ -224,6 +302,7 @@ router.get('/:id/charts', async (req, res, next) => {
       return {
         songId: key,
         title: song ? song.title : '',
+        playedKey: entry.playedKey || '',
         chart,
       };
     });
@@ -299,7 +378,21 @@ router.post('/:id/songs', async (req, res, next) => {
       return next(err);
     }
 
-    playlist.songs.push(songId);
+    let playedKey;
+    try {
+      playedKey = normalizePlayedKey(req.body.playedKey);
+    } catch (e) {
+      return next(e);
+    }
+
+    // Keep at most one entry per song (idempotent add); update its key if the
+    // song is already present rather than duplicating it.
+    const existing = playlist.songs.find((e) => String(e.song) === String(songId));
+    if (existing) {
+      existing.playedKey = playedKey;
+    } else {
+      playlist.songs.push({ song: songId, playedKey });
+    }
     await playlist.save();
     res.json(playlist);
   } catch (err) {
@@ -318,9 +411,53 @@ router.delete('/:id/songs/:songId', async (req, res, next) => {
       return next(err);
     }
 
-    playlist.songs.pull(req.params.songId);
+    const before = playlist.songs.length;
+    playlist.songs = playlist.songs.filter((e) => String(e.song) !== String(req.params.songId));
+    if (playlist.songs.length === before) {
+      const err = new Error('Song not in playlist');
+      err.status = 404;
+      err.code = 'NOT_FOUND';
+      return next(err);
+    }
     await playlist.save();
     res.json({ message: 'Song removed from playlist' });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /playlists/:id/songs/:songId — set/update a song's Played Key for THIS
+// playlist. Body: { playedKey } where playedKey is one of the 12 supported
+// major keys or '' to clear it ("Numbers" is not accepted — it's a display
+// mode, not a key).
+router.patch('/:id/songs/:songId', async (req, res, next) => {
+  try {
+    const playlist = await Playlist.findOne({ _id: req.params.id, band: req.currentBand });
+    if (!playlist) {
+      const err = new Error('Playlist not found');
+      err.status = 404;
+      err.code = 'NOT_FOUND';
+      return next(err);
+    }
+
+    const entry = playlist.songs.find((e) => String(e.song) === String(req.params.songId));
+    if (!entry) {
+      const err = new Error('Song not in playlist');
+      err.status = 404;
+      err.code = 'NOT_FOUND';
+      return next(err);
+    }
+
+    let playedKey;
+    try {
+      playedKey = normalizePlayedKey(req.body.playedKey);
+    } catch (e) {
+      return next(e);
+    }
+
+    entry.playedKey = playedKey;
+    await playlist.save();
+    res.json(playlist);
   } catch (err) {
     next(err);
   }
@@ -337,21 +474,23 @@ router.put('/:id/songs', async (req, res, next) => {
       return next(err);
     }
 
+    // The reorder payload is the full ordered list of song ids (bare ids). It
+    // must be a permutation of the current set; we reorder the existing
+    // subdocument entries so each song keeps its playedKey.
     const { songs } = req.body;
-    const currentIds = playlist.songs.map((id) => id.toString()).sort();
-    const submittedIds = (songs || []).map((id) => id.toString()).sort();
+    const submitted = (songs || []).map((id) => String(id));
+    const currentById = new Map(playlist.songs.map((e) => [String(e.song), e]));
 
-    if (
-      currentIds.length !== submittedIds.length ||
-      currentIds.some((id, i) => id !== submittedIds[i])
-    ) {
+    const sameSize = submitted.length === playlist.songs.length;
+    const sameSet = sameSize && [...submitted].sort().join(',') === [...currentById.keys()].sort().join(',');
+    if (!sameSet) {
       const err = new Error('Song list does not match current playlist songs');
       err.status = 422;
       err.code = 'SONGS_MISMATCH';
       return next(err);
     }
 
-    playlist.songs = songs;
+    playlist.songs = submitted.map((id) => currentById.get(id));
     await playlist.save();
     res.json(playlist);
   } catch (err) {
