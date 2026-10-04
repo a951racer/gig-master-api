@@ -30,10 +30,6 @@ const songSchema = new mongoose.Schema(
       type: String,
       default: '',
     },
-    performedKey: {
-      type: String,
-      default: '',
-    },
   },
   { timestamps: true }
 );

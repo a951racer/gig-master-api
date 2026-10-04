@@ -56,7 +56,7 @@ router.get('/', async (req, res, next) => {
 // POST /songs — create
 router.post('/', async (req, res, next) => {
   try {
-    const { title, artist, genre, tags, originalKey, performedKey } = req.body;
+    const { title, artist, genre, tags, originalKey } = req.body;
 
     if (!title) {
       const err = new Error('title is required');
@@ -85,7 +85,7 @@ router.post('/', async (req, res, next) => {
       }
     }
 
-    const song = new Song({ band: req.currentBand, title, artist, genre: genre || null, tags, originalKey, performedKey });
+    const song = new Song({ band: req.currentBand, title, artist, genre: genre || null, tags, originalKey });
     await song.save();
     await song.populate('genre', '_id name slug');
 
@@ -122,7 +122,7 @@ router.patch('/:id', async (req, res, next) => {
       return next(err);
     }
 
-    const { title, artist, genre, tags, originalKey, performedKey } = req.body;
+    const { title, artist, genre, tags, originalKey } = req.body;
 
     if ('genre' in req.body && genre !== null && genre !== undefined) {
       const genreDoc = await Genre.findOne({ _id: genre, band: req.currentBand });
@@ -140,7 +140,6 @@ router.patch('/:id', async (req, res, next) => {
     if ('genre' in req.body) song.genre = genre || null;
     if (tags !== undefined) song.tags = tags;
     if (originalKey !== undefined) song.originalKey = originalKey;
-    if (performedKey !== undefined) song.performedKey = performedKey;
 
     await song.save();
     await song.populate('genre', '_id name slug');
