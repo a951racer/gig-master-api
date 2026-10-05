@@ -122,6 +122,32 @@ function expectPdf(res) {
   expect(res.body.slice(0, 4).toString('ascii')).toBe('%PDF');
 }
 
+describe('GET /songs/:id/chart/pdf — pagination', () => {
+  it('a single-page chart produces a single-page PDF (no phantom page from the footer)', async () => {
+    const { token, band, song } = await seedChartedSong('pdf-1page@example.com');
+    // A short chart that paginates to exactly one page. The band-name footer
+    // sits near the page bottom; it must NOT trigger an auto-added page.
+    const put = await authed(
+      request(app).put(`/songs/${song._id}/chart`),
+      token,
+      band._id
+    ).send({ enteredKey: 'Numbers', body: 'VERSE 1\n[1]Short [4]and [5]sweet', formatting: { columns: 1 } });
+    expect(put.status).toBe(200);
+
+    // Confirm the view paginates to one page.
+    const view = await authed(request(app).get(`/songs/${song._id}/chart/view`), token, band._id);
+    expect(view.body.pages).toHaveLength(1);
+
+    const res = await authed(request(app).get(`/songs/${song._id}/chart/pdf`), token, band._id).buffer(true);
+    expectPdf(res);
+
+    // Count rendered pages in the PDF: "/Type /Page" (excluding "/Pages").
+    const txt = res.body.toString('latin1');
+    const pageCount = (txt.match(/\/Type\s*\/Page[^s]/g) || []).length;
+    expect(pageCount).toBe(1);
+  });
+});
+
 describe('GET /songs/:id/chart/pdf — valid PDF (R9.1)', () => {
   it('renders chord-only lines and quality/slash chords without error (superscript + spacing)', async () => {
     // Seed a charted song, then overwrite its chart with a body that has a

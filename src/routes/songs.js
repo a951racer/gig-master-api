@@ -565,7 +565,17 @@ router.get('/:id/chart/pdf', async (req, res, next) => {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    const doc = new PDFDocument({ size: 'LETTER', margin: 48, autoFirstPage: true });
+    // We position every element manually and handle our own pagination via the
+    // representation's `pages` array. pdfkit auto-adds a page whenever a text
+    // draw lands below the bottom margin — which the band-name footer (near the
+    // page bottom) was tripping, pushing all content onto a phantom page 2. Set
+    // the bottom margin to 0 so our near-bottom footer stays inside the content
+    // box and never triggers an automatic page break. (top/left/right keep 48.)
+    const doc = new PDFDocument({
+      size: 'LETTER',
+      margins: { top: 48, left: 48, right: 48, bottom: 0 },
+      autoFirstPage: true,
+    });
     doc.on('error', (streamErr) => {
       if (!res.headersSent) next(streamErr); else res.destroy(streamErr);
     });
