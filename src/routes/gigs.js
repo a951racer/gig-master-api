@@ -67,7 +67,9 @@ router.get('/:id', async (req, res, next) => {
     const gig = await Gig.findOne({ _id: req.params.id, band: req.currentBand }).populate({
       path: 'playlist',
       populate: {
-        path: 'songs',
+        // songs is now a subdocument array [{ song, playedKey }], so populate
+        // the nested song ref (and that song's genre), not the array itself.
+        path: 'songs.song',
         populate: { path: 'genre', select: '_id name slug' },
       },
     });
