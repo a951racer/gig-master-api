@@ -9,12 +9,15 @@ const router = express.Router();
 router.use(authenticate);
 router.use(bandScope);
 
-// GET /gigs — all gigs sorted by date descending, playlist name only
+// GET /gigs — all gigs sorted by date descending. The playlist is populated
+// with its name AND its songs (refs only, not deep-populated) so clients can
+// tell whether a gig has a non-empty setlist without fetching each gig — used
+// by Gig Master Live's gig picker to gate performable gigs (frontend #110).
 router.get('/', async (req, res, next) => {
   try {
     const gigs = await Gig.find({ band: req.currentBand })
       .sort({ date: -1 })
-      .populate('playlist', '_id name');
+      .populate('playlist', '_id name songs');
     res.json(gigs);
   } catch (err) {
     next(err);
