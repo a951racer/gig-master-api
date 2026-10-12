@@ -95,3 +95,32 @@ describe('GET /gigs/:id — setlist songs populated', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('GET /gigs — list exposes setlist size', () => {
+  it("populates playlist.songs so clients can tell a gig has a non-empty setlist", async () => {
+    const { band, token, gig } = await setup();
+
+    const res = await authed(request(app).get('/gigs'), token, band._id);
+
+    expect(res.status).toBe(200);
+    const listed = res.body.find((g) => g._id === gig._id.toString());
+    expect(listed).toBeTruthy();
+    expect(listed.playlist).toBeTruthy();
+    expect(listed.playlist.name).toBe('Nursing Home Gigs');
+    // songs is populated (refs only) so playlist.songs.length is usable in the
+    // list — the Gig Master Live picker gates performable gigs on this.
+    expect(Array.isArray(listed.playlist.songs)).toBe(true);
+    expect(listed.playlist.songs).toHaveLength(2);
+  });
+
+  it('a gig with no playlist lists playlist: null (non-performable)', async () => {
+    const { band, token } = await setup();
+    await Gig.create({ band: band._id, name: 'Open Mic', date: new Date('2026-07-01') });
+
+    const res = await authed(request(app).get('/gigs'), token, band._id);
+    expect(res.status).toBe(200);
+    const openMic = res.body.find((g) => g.name === 'Open Mic');
+    expect(openMic).toBeTruthy();
+    expect(openMic.playlist == null).toBe(true);
+  });
+});
