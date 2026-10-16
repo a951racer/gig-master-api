@@ -2,6 +2,7 @@ const express = require('express');
 const PDFDocument = require('pdfkit');
 const archiver = require('archiver');
 const Playlist = require('../models/Playlist');
+const { chartedSongIdSet } = require('../services/chartPresence');
 const Song = require('../models/Song');
 const Chart = require('../models/Chart');
 const authenticate = require('../middleware/authenticate');
@@ -254,7 +255,21 @@ router.get('/:id', async (req, res, next) => {
       err.code = 'NOT_FOUND';
       return next(err);
     }
-    res.json(playlist);
+
+    // Stamp a lightweight hasChart flag on each populated song so the setlist
+    // detail can show a "charted" indicator without a per-song lookup.
+    const out = playlist.toObject();
+    const entries = Array.isArray(out.songs) ? out.songs : [];
+    const songIds = entries
+      .map((e) => e && e.song && e.song._id)
+      .filter(Boolean);
+    const charted = await chartedSongIdSet(songIds);
+    for (const e of entries) {
+      if (e && e.song && e.song._id) {
+        e.song.hasChart = charted.has(String(e.song._id));
+      }
+    }
+    res.json(out);
   } catch (err) {
     next(err);
   }

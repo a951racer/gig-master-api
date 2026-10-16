@@ -12,6 +12,7 @@ const { paginate } = require('../services/chartLayout');
 // PDF layout lives in a shared service (issue #77) so the single-chart route
 // here and the playlist combined/zip routes draw identical pages.
 const { layoutChartPdf, sanitizePdfFilename } = require('../services/chartPdf');
+const { chartedSongIdSet } = require('../services/chartPresence');
 
 const router = express.Router();
 
@@ -40,7 +41,15 @@ router.get('/', async (req, res, next) => {
     }
 
     const songs = await Song.find(filter).populate('genre', '_id name slug');
-    res.json(songs);
+
+    // Stamp a lightweight hasChart flag so the list can show a "charted"
+    // indicator without an N+1 per-song chart lookup.
+    const charted = await chartedSongIdSet(songs.map((sg) => sg._id));
+    const withChartFlag = songs.map((sg) => ({
+      ...sg.toObject(),
+      hasChart: charted.has(String(sg._id)),
+    }));
+    res.json(withChartFlag);
   } catch (err) {
     next(err);
   }
