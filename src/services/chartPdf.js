@@ -181,10 +181,15 @@ function layoutChartPdf(doc, representation) {
     return cx;
   };
 
-  const drawContentLine = (segments, x0, y) => {
+  const drawContentLine = (line, x0, y) => {
+    const segments = line.segments || [];
     const anyChord = segments.some((s) => s.chord);
     const chordRowH = anyChord ? CHORD_SIZE + 2 : 0;
     const lyricY = y + chordRowH;
+    // A chord-only line (chords [+ repeat badge], no lyrics) draws a single
+    // chord row with NO lyric row beneath it, so it also reserves no lyric-row
+    // height (collapses — matches chartLayout's chordOnlyRow metric).
+    const chordOnly = Boolean(line.chordOnly);
 
     // Walk segments left-to-right. Each segment advances x by the GREATER of
     // its MEASURED lyric width and its MEASURED chord width (+ a space gap) so a
@@ -196,16 +201,30 @@ function layoutChartPdf(doc, representation) {
       const lyric = seg.lyric || '';
       const parts = chordDisplay(seg);
 
-      if (lyric !== '') {
+      // On a chord-only line there is no lyric row, so never draw lyric text.
+      if (!chordOnly && lyric !== '') {
         doc.font(LYRIC_FONT).fontSize(BODY_SIZE).fillColor('black').text(lyric, x, lyricY, { lineBreak: false });
       }
       if (parts) drawChord(parts, x, y);
 
-      const lyricW = measure(lyric, LYRIC_FONT, BODY_SIZE);
+      const lyricW = chordOnly ? 0 : measure(lyric, LYRIC_FONT, BODY_SIZE);
       const chW = parts ? chordWidth(parts) + chordSpace : 0; // + one space gap
       x += Math.max(lyricW, chW);
     }
 
+    // Repeat badge (e.g. "x4"), only on chord-only lines: drawn inline on the
+    // chord row immediately after the last chord, in the chord color/font but
+    // not superscripted — a plain same-row annotation.
+    if (chordOnly && line.repeat) {
+      doc.font(CHORD_FONT).fontSize(CHORD_SIZE).fillColor(chordColor)
+        .text(line.repeat, x, y, { lineBreak: false });
+      doc.fillColor('black');
+    }
+
+    // Chord-only: just the chord row height (+ line gap), no lyric row.
+    if (chordOnly) {
+      return chordRowH + LINE_GAP;
+    }
     return chordRowH + BODY_SIZE + 2 + LINE_GAP;
   };
 
@@ -239,7 +258,7 @@ function layoutChartPdf(doc, representation) {
           y += BODY_SIZE * 0.6;
           continue;
         }
-        y += drawContentLine(line.segments, x0, y);
+        y += drawContentLine(line, x0, y);
       }
     });
   });
