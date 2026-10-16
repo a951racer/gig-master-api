@@ -213,12 +213,12 @@ function layoutChartPdf(doc, representation) {
     }
 
     // Repeat badge (e.g. "x4"), only on chord-only lines: drawn inline on the
-    // chord row immediately after the last chord, in the chord color/font but
-    // not superscripted — a plain same-row annotation.
+    // chord row immediately after the last chord. Uses the LYRIC color (black),
+    // not the chord color, so it reads as an annotation rather than a chord; in
+    // the chord font/size but not superscripted.
     if (chordOnly && line.repeat) {
-      doc.font(CHORD_FONT).fontSize(CHORD_SIZE).fillColor(chordColor)
+      doc.font(CHORD_FONT).fontSize(CHORD_SIZE).fillColor('black')
         .text(line.repeat, x, y, { lineBreak: false });
-      doc.fillColor('black');
     }
 
     // Chord-only: just the chord row height (+ line gap), no lyric row.
