@@ -611,6 +611,14 @@ function numbersToNames(body, key, options = {}) {
  * @property {(null|'PAGE_BREAK'|'COLUMN_BREAK'|'TRANSPOSE_KEY')} directive
  * @property {?number} transposeShift  Signed semitones when
  *   `directive === 'TRANSPOSE_KEY'`, else null.
+ * @property {boolean} [chordOnly]  True when the line's only content is chord
+ *   tokens (`[...]`), an optional trailing repeat badge, and whitespace — no
+ *   lyric text. Such a line renders a single chord row (no empty lyric row
+ *   beneath it) and collapses its height accordingly.
+ * @property {?string} [repeat]  The verbatim inner text of a trailing `{...}`
+ *   repeat badge on a CHORD-ONLY line (e.g. `"x4"`), rendered inline after the
+ *   last chord on the chord row; null/absent when there is no badge. A `{...}`
+ *   on a line that has lyrics is NOT a badge — it stays literal lyric text.
  */
 
 /**
@@ -667,6 +675,52 @@ function chordParts(token) {
     // Unparseable (e.g. a verbatim passthrough token): show it as-is.
     return { root: token, quality: '', bass: null };
   }
+}
+
+/**
+ * A trailing repeat badge on a line: a `{...}` at the very end (after any
+ * trailing whitespace). Captures the inner text verbatim in group 1.
+ */
+const TRAILING_BADGE_RE = /\{([^{}]*)\}\s*$/;
+
+/**
+ * Decide whether `line` is a CHORD-ONLY line and, if so, extract its optional
+ * trailing repeat badge.
+ *
+ * A chord-only line's only content is: inline chord tokens `[...]`, at most one
+ * trailing `{...}` repeat badge, and whitespace (spaces/tabs). Any other
+ * non-whitespace text (i.e. lyrics) makes it a normal content line, in which
+ * case a `{...}` is just literal lyric text and NOT a badge.
+ *
+ * Returns `{ bodyWithoutBadge, repeat }` when the line is chord-only
+ * (`repeat` is the badge's inner text, or null when there is no badge), else
+ * returns `null`.
+ *
+ * @param {string} line
+ * @returns {{ bodyWithoutBadge: string, repeat: (string|null) }|null}
+ */
+function chordOnlyLine(line) {
+  // Peel a single trailing {...} badge (if present) before testing.
+  let repeat = null;
+  let rest = line;
+  const badge = TRAILING_BADGE_RE.exec(line);
+  if (badge) {
+    repeat = badge[1];
+    rest = line.slice(0, badge.index);
+  }
+
+  // Remove every [chord] token, then whatever remains must be whitespace only
+  // for the line to qualify as chord-only. Also require at least one chord so a
+  // bare `{x4}` on its own (no chords) is not treated as a chord-only line.
+  const hadChord = /\[[^\]]*\]/.test(rest);
+  const withoutChords = rest.replace(/\[[^\]]*\]/g, '');
+  if (!hadChord || withoutChords.trim() !== '') {
+    return null;
+  }
+
+  // `bodyWithoutBadge` is the line with the badge stripped; segmentLine runs on
+  // it so the badge never becomes a lyric segment.
+  return { bodyWithoutBadge: rest, repeat };
 }
 
 function segmentLine(line) {
@@ -729,6 +783,20 @@ function buildLine(line) {
   // Blank line: a content line with no segments (preserves stanza spacing).
   if (trimmed === '') {
     return { segments: [], directive: null, transposeShift: null };
+  }
+
+  // Chord-only line (only [chord] tokens, an optional trailing {...} repeat
+  // badge, and whitespace): segment the chords, attach the verbatim badge, and
+  // flag it so the renderer draws a single chord row with no lyric row beneath.
+  const chordOnly = chordOnlyLine(line);
+  if (chordOnly) {
+    return {
+      segments: segmentLine(chordOnly.bodyWithoutBadge),
+      directive: null,
+      transposeShift: null,
+      chordOnly: true,
+      repeat: chordOnly.repeat,
+    };
   }
 
   // Lyric+chord content line.

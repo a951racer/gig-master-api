@@ -99,6 +99,9 @@ function metricsFor(sizePt) {
     lyricPx,
     // a content line with chords stacks a chord row over a lyric row
     contentWithChord: chordLine + lyricLine + gap,
+    // a CHORD-ONLY line (chords [+ repeat badge], no lyrics) is just the chord
+    // row + gap — no empty lyric row reserved beneath it
+    chordOnlyRow: chordLine + gap,
     // a lyric-only / chord-only content line
     contentPlain: lyricLine + gap,
     // a blank stanza spacer
@@ -164,13 +167,23 @@ function flattenToItems(sections, m) {
       const isBlank = !line.segments || line.segments.length === 0;
       const height = isBlank
         ? m.blank
-        : lineHasChord(line)
-          ? m.contentWithChord
-          : m.contentPlain;
+        : line.chordOnly
+          ? m.chordOnlyRow
+          : lineHasChord(line)
+            ? m.contentWithChord
+            : m.contentPlain;
       items.push({
         kind: 'content',
         height,
-        line: { segments: line.segments || [], directive: null, transposeShift: null },
+        line: {
+          segments: line.segments || [],
+          directive: null,
+          transposeShift: null,
+          // Carry the chord-only flag + repeat badge through to the renderers
+          // (web + PDF) so they draw a single chord row with an inline badge.
+          chordOnly: line.chordOnly || false,
+          repeat: line.repeat ?? null,
+        },
       });
     }
   }
